@@ -22,6 +22,7 @@ Previous phases:
 """
 
 import math
+import requests
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -843,6 +844,65 @@ else:
             </div>""", unsafe_allow_html=True)
             st.write("")
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Section 3b — Real AWS VM Demo
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown('<p class="section-title">☁️  Real AWS VM Demo</p>', unsafe_allow_html=True)
+st.markdown("This optional demo sends a test workload to a real AWS EC2 VM. The main load-balancing simulation continues to use simulated VMs.")
+st.caption("⚠️ Manual demo only — requests are sent only when a button is clicked.")
+
+aws_worker_url = ""
+try:
+    aws_worker_url = st.secrets.get("AWS_WORKER_URL", "").rstrip("/")
+except Exception:
+    pass
+
+if not aws_worker_url:
+    st.info("Real AWS VM Demo is not configured.")
+else:
+    c1, c2 = st.columns(2)
+    
+    with c1:
+        if st.button("Check AWS VM Health", icon="🏥"):
+            with st.spinner("Checking health..."):
+                try:
+                    resp = requests.get(f"{aws_worker_url}/health", timeout=5)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        st.success(
+                            f"**Status:** {data.get('status', 'OK')}  \n"
+                            f"**Worker/VM hostname:** {data.get('worker', 'Unknown')}  \n"
+                            f"**Cloud:** AWS EC2"
+                        )
+                    else:
+                        st.error(f"Failed with status: {resp.status_code}")
+                except requests.exceptions.RequestException:
+                    st.error("Failed to connect to AWS VM. (Timeout or Unreachable)")
+    
+    with c2:
+        if st.button("Send Test Task", icon="🚀"):
+            with st.spinner("Sending task..."):
+                try:
+                    payload = {"task_id": "DEMO-1", "processing_units": 10}
+                    resp = requests.post(f"{aws_worker_url}/task", json=payload, timeout=5)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        st.success(
+                            f"**Task ID:** DEMO-1  \n"
+                            f"**Processing Units:** 10  \n"
+                            f"**Status:** {data.get('status', 'Completed')}  \n"
+                            f"**Worker:** {data.get('worker', 'Unknown')}  \n"
+                            f"**Execution Time:** {data.get('execution_time_seconds', 'N/A')}s  \n"
+                            f"**Cloud:** AWS EC2"
+                        )
+                    else:
+                        st.error(f"Failed with status: {resp.status_code}")
+                except requests.exceptions.RequestException:
+                    st.error("Failed to connect to AWS VM. (Timeout or Unreachable)")
+                    
+    st.write("")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Section 4 — Task Distribution
