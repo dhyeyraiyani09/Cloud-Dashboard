@@ -183,6 +183,14 @@ body { font-family: 'Segoe UI', sans-serif; }
 # ─────────────────────────────────────────────────────────────────────────────
 if "engine" not in st.session_state:
     st.session_state.engine = SimulationEngine()
+elif not hasattr(st.session_state.engine, "get_priority_tier_comparison") or not isinstance(st.session_state.engine, SimulationEngine):
+    # Recover stale instance from pre-update session across hot-reloads / deployments
+    try:
+        st.session_state.engine.__class__ = SimulationEngine
+        if not hasattr(st.session_state.engine, "comparison_tasks"):
+            st.session_state.engine.comparison_tasks = None
+    except Exception:
+        st.session_state.engine = SimulationEngine()
 
 engine: SimulationEngine = st.session_state.engine
 
@@ -1377,6 +1385,13 @@ else:
         )
 
         # ── Priority-Tier Performance Comparison (Phase 14.1) ─────────────────
+        if not hasattr(engine, "get_priority_tier_comparison"):
+            try:
+                engine.__class__ = SimulationEngine
+                if not hasattr(engine, "comparison_tasks"):
+                    engine.comparison_tasks = None
+            except Exception:
+                pass
         pt_rows = engine.get_priority_tier_comparison()
         if pt_rows and tt and pa:
             st.markdown("#### 🎯 Priority-Tier Performance Comparison (Traditional Throttled vs PAALB)")

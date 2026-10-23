@@ -89,6 +89,7 @@ class SimulationEngine:
         self.scaling_listener = None
         self.current_metrics  = None
         self.comparison_results = None
+        self.comparison_tasks   = None
         self.workload_source  = workload_source
 
         self.vms   = create_vms(num_vms, base_capacity=vm_capacity)
@@ -291,13 +292,14 @@ class SimulationEngine:
         -------
         List of dicts formatted for tabular presentation, or None if no comparison run.
         """
-        if not self.comparison_tasks:
+        comparison_tasks = getattr(self, "comparison_tasks", None)
+        if not comparison_tasks:
             return None
 
-        tt_tasks = self.comparison_tasks.get("Traditional Throttled")
+        tt_tasks = comparison_tasks.get("Traditional Throttled")
         pa_tasks = (
-            self.comparison_tasks.get("Priority-Aware Adaptive (PAALB)") or
-            self.comparison_tasks.get("PAALB")
+            comparison_tasks.get("Priority-Aware Adaptive (PAALB)") or
+            comparison_tasks.get("PAALB")
         )
         if not tt_tasks or not pa_tasks:
             return None
@@ -320,10 +322,10 @@ class SimulationEngine:
             ]
 
             count = len(tt_matching)
-            if count == 0:
+            if count == 0 or len(pa_matching) == 0:
                 rows.append({
                     "Priority Tier / Group"         : tier_name,
-                    "Task Count"                    : 0,
+                    "Task Count"                    : count,
                     "Traditional Throttled Avg RT (tu)": "—",
                     "PAALB Avg RT (tu)"             : "—",
                     "Absolute Change (tu)"          : "—",
