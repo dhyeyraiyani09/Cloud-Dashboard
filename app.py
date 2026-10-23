@@ -27,15 +27,19 @@ import streamlit.components.v1 as components
 import pandas as pd
 import plotly.graph_objects as go
 
-# ── Simulation engine ─────────────────────────────────────────────────────────
+# ── Simulation engine & workload sources ──────────────────────────────────────
 from simulation.engine import (
     SimulationEngine, SIM_NOT_STARTED, SIM_READY, SIM_COMPLETED
 )
 from simulation.vm import STATUS_IDLE, STATUS_BUSY, STATUS_FAILED
+from simulation.google_trace import (
+    load_bundled_google_trace, parse_google_trace, TraceParseResult
+)
 
-# ── Algorithm identifier ──────────────────────────────────────────────────────
-ALGO_RR        = "Round Robin (Static)"
-ALGO_THROTTLED = "Throttled (Dynamic)"
+# ── Algorithm identifiers ─────────────────────────────────────────────────────
+ALGO_RR           = "Round Robin (Static)"
+ALGO_LEAST_LOADED = "Least-Loaded Dynamic (Existing Variant)"
+ALGO_THROTTLED    = ALGO_LEAST_LOADED  # backward compatibility alias
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page configuration — must be the first Streamlit call
@@ -191,11 +195,69 @@ with st.sidebar:
     st.markdown("**Load Balancing Algorithm**")
     algorithm = st.radio(
         label="Algorithm",
-        options=[ALGO_RR, ALGO_THROTTLED],
+        options=[ALGO_RR, ALGO_LEAST_LOADED],
         index=0,
-        help="Round Robin (Static) vs Throttled (Dynamic).",
+        help="Round Robin (Static) vs Least-Loaded Dynamic (Existing Variant, previously labeled Throttled).",
         label_visibility="collapsed",
     )
+
+    st.markdown("---")
+
+    st.markdown("**Workload Source**")
+    workload_source = st.radio(
+        label="Workload Source",
+        options=["Synthetic Workload", "Google Cluster Trace"],
+        index=0,
+        help="Synthetic mixed distribution vs genuine Google Cluster Data 2011-2.",
+        label_visibility="collapsed",
+    )
+
+    trace_parse_result = None
+    trace_tasks = None
+
+    if workload_source == "Google Cluster Trace":
+        trace_mode = st.radio(
+            "Trace Source",
+            options=["Bundled 2011-2 Sample", "Upload Custom Trace CSV"],
+            index=0,
+            horizontal=True,
+            help="Select the bundled official 500-task sample or upload your own trace CSV.",
+        )
+        if trace_mode == "Bundled 2011-2 Sample":
+            try:
+                trace_parse_result = load_bundled_google_trace()
+                trace_tasks = trace_parse_result.tasks
+            except Exception as e:
+                st.error(f"Failed to load bundled trace: {e}")
+        else:
+            st.caption(
+                "Upload a Google Cluster Trace CSV (`task_events`) or CSV with a `cpu_request` column."
+            )
+            uploaded_trace = st.file_uploader(
+                "Choose Trace CSV",
+                type=["csv", "gz"],
+                help="Accepts official 13-column schema or CSV with cpu_request column.",
+            )
+            if uploaded_trace is not None:
+                try:
+                    trace_parse_result = parse_google_trace(uploaded_trace)
+                    trace_tasks = trace_parse_result.tasks
+                except Exception as e:
+                    st.error(f"Failed to parse uploaded trace: {e}")
+            else:
+                st.info("Upload a trace file to run simulation on custom trace.")
+
+        if trace_parse_result and trace_tasks:
+            with st.expander("ℹ️ Google Cluster Trace Info", expanded=False):
+                st.markdown(
+                    "**Dataset:** Google Cluster Data 2011-2 (v2.1)  \n"
+                    "**Source:** [github.com/google/cluster-data](https://github.com/google/cluster-data)  \n"
+                    "**License:** Creative Commons CC-BY 4.0  \n"
+                    f"**Usable Records:** {trace_parse_result.records_accepted} (Read: {trace_parse_result.records_read})  \n"
+                    f"**CPU Request Range:** {trace_parse_result.min_raw_cpu:.5f} – {trace_parse_result.max_raw_cpu:.5f} (Mean: {trace_parse_result.avg_raw_cpu:.5f})  \n"
+                    "**Normalization:** `Units = clamp(round(CPU_Request * 100), 1, 100)`  \n"
+                    "**Semantics:** Trace-informed workload replay evaluating static Round Robin vs. least-loaded dynamic scheduling."
+                )
 
     st.markdown("---")
 
@@ -203,10 +265,18 @@ with st.sidebar:
         "Number of VMs",  min_value=2, max_value=10, value=4, step=1,
         help="Initial number of VMs. The Scaling Listener may add or remove VMs before task assignment.",
     )
-    num_tasks = st.slider(
-        "Number of Tasks", min_value=10, max_value=500, value=100, step=10,
-        help="Total number of tasks to distribute across VMs.",
-    )
+    if workload_source == "Google Cluster Trace":
+        max_avail = len(trace_tasks) if trace_tasks else 500
+        default_val = min(100, max_avail)
+        num_tasks = st.slider(
+            "Number of Tasks", min_value=10, max_value=max(10, max_avail), value=default_val, step=10,
+            help=f"Total number of trace tasks to distribute across VMs (up to {max_avail}).",
+        )
+    else:
+        num_tasks = st.slider(
+            "Number of Tasks", min_value=10, max_value=500, value=100, step=10,
+            help="Total number of tasks to distribute across VMs.",
+        )
 
     st.markdown("---")
 
@@ -293,51 +363,59 @@ with st.sidebar:
     )
 
     if start_btn:
-        try:
-            engine.initialize(
-                num_vms=num_vms,
-                num_tasks=num_tasks,
-                algorithm=algorithm,
-            )
-            # Phase 5 — run scaling listener BEFORE the load balancer
-            if scaling_enabled:
-                engine.run_scaling(
-                    scale_up_threshold   = float(scale_up_pct),
-                    scale_down_threshold = float(scale_down_pct),
-                    min_vms              = min_vms_cfg,
-                    max_vms              = max_vms_cfg,
+        if workload_source == "Google Cluster Trace" and not trace_tasks:
+            st.error("Cannot start simulation: No valid Google Cluster Trace loaded.")
+        else:
+            try:
+                engine.initialize(
+                    num_vms=num_vms,
+                    num_tasks=num_tasks,
+                    algorithm=algorithm,
+                    custom_tasks=trace_tasks if workload_source == "Google Cluster Trace" else None,
+                    workload_source="google_trace" if workload_source == "Google Cluster Trace" else "synthetic",
                 )
+                if trace_parse_result:
+                    engine.trace_parse_result = trace_parse_result
 
-            # Phase 8 — run with failover OR normal run
-            if failure_enabled:
-                engine.run_algorithm_with_failover(
-                    fail_vm_id          = fail_vm_id,
-                    failure_after_tasks = failure_after,
-                )
-                fm = engine.failover_manager
-                st.success(
-                    f"✅ Simulation with Failover complete!  \n"
-                    f"**{engine.active_vm_count} active VM(s)** · "
-                    f"**{num_tasks} tasks** total  \n"
-                    f"🔴 **{fm.failed_vm_name}** failed after task {fm.tasks_before_failure} · "
-                    f"{fm.tasks_after_failure} task(s) redirected."
-                )
-            else:
-                engine.run_algorithm()
-                algo_short = "Round Robin" if "round robin" in algorithm.lower() else "Throttled"
-                sl = engine.scaling_listener
-                scale_note = ""
-                if sl and (sl.vms_added or sl.vms_removed):
-                    scale_note = (
-                        f"  \n🔼 +{sl.vms_added} VM(s) added · 🔽 -{sl.vms_removed} VM(s) removed"
+                # Phase 5 — run scaling listener BEFORE the load balancer
+                if scaling_enabled:
+                    engine.run_scaling(
+                        scale_up_threshold   = float(scale_up_pct),
+                        scale_down_threshold = float(scale_down_pct),
+                        min_vms              = min_vms_cfg,
+                        max_vms              = max_vms_cfg,
                     )
-                st.success(
-                    f"✅ {algo_short} complete!  \n"
-                    f"**{engine.active_vm_count} active VMs** · **{num_tasks} Tasks** assigned."
-                    + scale_note
-                )
-        except Exception as exc:
-            st.error(f"Simulation error: {exc}")
+
+                # Phase 8 — run with failover OR normal run
+                if failure_enabled:
+                    engine.run_algorithm_with_failover(
+                        fail_vm_id          = fail_vm_id,
+                        failure_after_tasks = failure_after,
+                    )
+                    fm = engine.failover_manager
+                    st.success(
+                        f"✅ Simulation with Failover complete!  \n"
+                        f"**{engine.active_vm_count} active VM(s)** · "
+                        f"**{num_tasks} tasks** total  \n"
+                        f"🔴 **{fm.failed_vm_name}** failed after task {fm.tasks_before_failure} · "
+                        f"{fm.tasks_after_failure} task(s) redirected."
+                    )
+                else:
+                    engine.run_algorithm()
+                    algo_short = "Round Robin" if "round robin" in algorithm.lower() else "Least-Loaded Dynamic"
+                    sl = engine.scaling_listener
+                    scale_note = ""
+                    if sl and (sl.vms_added or sl.vms_removed):
+                        scale_note = (
+                            f"  \n🔼 +{sl.vms_added} VM(s) added · 🔽 -{sl.vms_removed} VM(s) removed"
+                        )
+                    st.success(
+                        f"✅ {algo_short} complete!  \n"
+                        f"**{engine.active_vm_count} active VMs** · **{num_tasks} Tasks** assigned."
+                        + scale_note
+                    )
+            except Exception as exc:
+                st.error(f"Simulation error: {exc}")
 
     # ── Reset Simulation ──────────────────────────────────────────────────────
     reset_btn = st.button(
@@ -354,10 +432,11 @@ with st.sidebar:
 
     # ── Run Comparison (Phase 6) ───────────────────────────────────────────────
     st.markdown("**⚖️ Algorithm Comparison**")
+    max_cmp_tasks = len(trace_tasks) if (workload_source == "Google Cluster Trace" and trace_tasks) else 500
     cmp_tasks = st.slider(
         "Comparison Tasks",
-        min_value=10, max_value=500, value=100, step=10,
-        help="Number of tasks for the fair comparison run (seed=42).",
+        min_value=10, max_value=max(10, max_cmp_tasks), value=min(100, max_cmp_tasks), step=10,
+        help="Number of tasks for the fair comparison run.",
     )
     cmp_vms = st.slider(
         "Comparison VMs",
@@ -369,29 +448,34 @@ with st.sidebar:
         use_container_width=True,
         type="primary",
         help=(
-            "Runs Round Robin AND Throttled on the SAME generated workload "
-            "(seed=42) with the same VMs and scaling settings."
+            "Runs Round Robin AND Least-Loaded Dynamic on the SAME workload "
+            "with the same VMs and scaling settings."
         ),
     )
     if compare_btn:
-        try:
-            engine.run_comparison(
-                num_vms              = cmp_vms,
-                num_tasks            = cmp_tasks,
-                vm_capacity          = 100,
-                seed                 = 42,
-                scaling_enabled      = scaling_enabled,
-                scale_up_threshold   = float(scale_up_pct),
-                scale_down_threshold = float(scale_down_pct),
-                min_vms              = min_vms_cfg,
-                max_vms              = max_vms_cfg,
-            )
-            st.success(
-                f"✅ Comparison complete! ({cmp_vms} VMs, {cmp_tasks} tasks, seed=42, "
-                f"scaling={'ON' if scaling_enabled else 'OFF'})"
-            )
-        except Exception as exc:
-            st.error(f"Comparison error: {exc}")
+        if workload_source == "Google Cluster Trace" and not trace_tasks:
+            st.error("Cannot run comparison: No valid Google Cluster Trace loaded.")
+        else:
+            try:
+                engine.run_comparison(
+                    num_vms              = cmp_vms,
+                    num_tasks            = cmp_tasks,
+                    vm_capacity          = 100,
+                    seed                 = 42,
+                    scaling_enabled      = scaling_enabled,
+                    scale_up_threshold   = float(scale_up_pct),
+                    scale_down_threshold = float(scale_down_pct),
+                    min_vms              = min_vms_cfg,
+                    max_vms              = max_vms_cfg,
+                    custom_tasks         = trace_tasks if workload_source == "Google Cluster Trace" else None,
+                )
+                src_note = "Google Cluster Trace" if workload_source == "Google Cluster Trace" else "seed=42"
+                st.success(
+                    f"✅ Comparison complete! ({cmp_vms} VMs, {cmp_tasks} tasks, {src_note}, "
+                    f"scaling={'ON' if scaling_enabled else 'OFF'})"
+                )
+            except Exception as exc:
+                st.error(f"Comparison error: {exc}")
 
     st.markdown("---")
 
@@ -404,11 +488,13 @@ with st.sidebar:
     st.caption(f"**Status:** {status_labels.get(engine.status, engine.status)}")
     if engine.status == SIM_COMPLETED:
         st.caption(f"**Algorithm:** {engine.algorithm}")
+        src_label = "Google Cluster Trace" if getattr(engine, "workload_source", "synthetic") == "google_trace" else "Synthetic Workload"
+        st.caption(f"**Workload:** {src_label}")
     has_cmp  = engine.comparison_results  is not None
     has_scal = engine.scalability_results is not None
     has_fo   = engine.failover_manager    is not None and getattr(engine.failover_manager, "failure_triggered", False)
     st.caption(
-        "Round Robin & Throttled ✅  \n"
+        "Round Robin & Least-Loaded Dynamic ✅  \n"
         "Auto-Scaling ✅  \n"
         f"Performance Metrics ✅ {'· Comparison ✅' if has_cmp else ''}  \n"
         f"Scalability Testing {'✅' if has_scal else '(use Run Scalability)'}  \n"
@@ -444,31 +530,36 @@ with st.sidebar:
         use_container_width=True,
         type="primary",
         help=(
-            "Runs both Round Robin AND Throttled across the selected workload(s) "
-            "using identical task lists (seed=42). Does NOT affect main simulation state."
+            "Runs both Round Robin AND Least-Loaded Dynamic across the selected workload(s) "
+            "using identical task lists. Does NOT affect main simulation state."
         ),
     )
     if scal_btn:
-        task_counts = _WORKLOAD_SCENARIOS[scal_scenario]
-        try:
-            engine.run_scalability_test(
-                task_counts          = task_counts,
-                num_vms              = scal_vms,
-                vm_capacity          = 100,
-                seed                 = 42,
-                scaling_enabled      = scaling_enabled,
-                scale_up_threshold   = float(scale_up_pct),
-                scale_down_threshold = float(scale_down_pct),
-                min_vms              = min_vms_cfg,
-                max_vms              = max_vms_cfg,
-            )
-            n_runs = len(engine.scalability_results)
-            st.success(
-                f"✅ Scalability test complete! ({n_runs // 2} workload sizes × 2 algorithms, "
-                f"seed=42, scaling={'ON' if scaling_enabled else 'OFF'})"
-            )
-        except Exception as exc:
-            st.error(f"Scalability test error: {exc}")
+        if workload_source == "Google Cluster Trace" and not trace_tasks:
+            st.error("Cannot run scalability test: No valid Google Cluster Trace loaded.")
+        else:
+            task_counts = _WORKLOAD_SCENARIOS[scal_scenario]
+            try:
+                engine.run_scalability_test(
+                    task_counts          = task_counts,
+                    num_vms              = scal_vms,
+                    vm_capacity          = 100,
+                    seed                 = 42,
+                    scaling_enabled      = scaling_enabled,
+                    scale_up_threshold   = float(scale_up_pct),
+                    scale_down_threshold = float(scale_down_pct),
+                    min_vms              = min_vms_cfg,
+                    max_vms              = max_vms_cfg,
+                    custom_tasks         = trace_tasks if workload_source == "Google Cluster Trace" else None,
+                )
+                n_runs = len(engine.scalability_results)
+                src_note = "Google Cluster Trace" if workload_source == "Google Cluster Trace" else "seed=42"
+                st.success(
+                    f"✅ Scalability test complete! ({n_runs // 2} workload sizes × 2 algorithms, "
+                    f"{src_note}, scaling={'ON' if scaling_enabled else 'OFF'})"
+                )
+            except Exception as exc:
+                st.error(f"Scalability test error: {exc}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -516,12 +607,12 @@ else:
     <div class="algo-info-banner algo-info-throttled">
         <div class="ai-icon">⚡</div>
         <div>
-            <div class="ai-title">Throttled Load Balancing — Dynamic Algorithm</div>
+            <div class="ai-title">Least-Loaded Dynamic (Existing Variant)</div>
             <div class="ai-desc">
                 Tasks are assigned to the <em>least-loaded available VM</em> based on
-                current accumulated workload. Unlike Round Robin, the algorithm
-                re-inspects the VM state table before every assignment decision,
-                adapting dynamically to heterogeneous task sizes.
+                current accumulated workload (minimum cumulative processing units). Unlike static Round Robin, the algorithm
+                re-inspects VM loads before every assignment decision, adapting dynamically to heterogeneous task sizes.
+                <br><em>Note: Previously labeled in this project as "Throttled (Dynamic)". Following an academic audit, it is documented as a least-loaded dynamic variant rather than the traditional availability-table first-available Throttled algorithm.</em>
             </div>
         </div>
     </div>""", unsafe_allow_html=True)
@@ -850,6 +941,13 @@ else:
 st.markdown('<p class="section-title">📦  Task Distribution</p>', unsafe_allow_html=True)
 
 if sim_active and engine.tasks:
+    if getattr(engine, "workload_source", "synthetic") == "google_trace":
+        st.info(
+            "📊 **Workload Source:** Google Cluster Trace (clusterdata-2011-2, v2.1) · "
+            "Replaying genuine cluster task requests normalized via `clamp(round(CPU_Request * 100), 1, 100)`.",
+            icon="ℹ️"
+        )
+
     task_dicts = engine.get_task_dicts(max_rows=200)
     df_tasks   = pd.DataFrame(task_dicts)
 
@@ -887,6 +985,8 @@ if sim_active and engine.tasks:
             "Arrival #"   : st.column_config.NumberColumn("Arrival #", width="small"),
             "Status"      : st.column_config.TextColumn("Status",      width="small"),
             "Assigned VM" : st.column_config.TextColumn("Assigned VM", width="small"),
+            "Job ID"      : st.column_config.NumberColumn("Job ID",    width="small"),
+            "Raw CPU"     : st.column_config.TextColumn("Raw CPU (norm)", width="small"),
         },
     )
     if total > 200:
@@ -905,7 +1005,7 @@ else:
 # ─────────────────────────────────────────────────────────────────────────────
 if sim_done and engine.algorithm_result:
     is_rr        = "round robin" in engine.algorithm.lower()
-    is_throttled = "throttled"   in engine.algorithm.lower()
+    is_throttled = "throttled" in engine.algorithm.lower() or "least" in engine.algorithm.lower()
 
     if is_rr:
         section_title = "📈  Round Robin Assignment Summary"
@@ -914,11 +1014,11 @@ if sim_done and engine.algorithm_result:
             "size, so VMs may have different total loads even if task counts are equal."
         )
     else:
-        section_title = "⚡  Throttled Assignment Summary"
+        section_title = "⚡  Least-Loaded Dynamic Assignment Summary"
         caption_note  = (
-            "💡 Throttled assigns each task to the **least-loaded VM** at that moment, "
+            "💡 Assigns each task to the **least-loaded available VM** (minimum current load) at that moment, "
             "so total loads tend to be more balanced than Round Robin — "
-            "though task count per VM may be unequal."
+            "though task count per VM may be unequal. (Previously labeled Throttled)."
         )
 
     st.markdown(f'<p class="section-title">{section_title}</p>', unsafe_allow_html=True)
@@ -1033,33 +1133,37 @@ st.markdown("""
         • Simple and deterministic.</span>
     </div>
     <div style="flex:1; background:#1e293b; padding:1rem; border-radius:8px; border-left:4px solid #f97316;">
-        <strong style="color:#fb923c;">🟠 THROTTLED — DYNAMIC</strong><br>
+        <strong style="color:#fb923c;">🟠 LEAST-LOADED DYNAMIC (EXISTING VARIANT)</strong><br>
         <span style="font-size:0.85rem; color:#cbd5e1;">
-        • Considers current VM workload.<br>
+        • Considers current cumulative VM workload.<br>
         • Selects the least-loaded available VM.<br>
-        • Dynamically reacts to workload distribution.</span>
+        • Dynamically reacts to task size variations.<br>
+        • <em>Note: Previously labeled Throttled.</em></span>
     </div>
 </div>
 """, unsafe_allow_html=True)
 
 cmp = engine.comparison_results  # {algo_name: PerformanceMetrics} | None
 ALGO_RR = "Round Robin (Static)"
-ALGO_TH = "Throttled (Dynamic)"
+ALGO_LEAST_LOADED = "Least-Loaded Dynamic (Existing Variant)"
+ALGO_TH = ALGO_LEAST_LOADED
 
 if not cmp:
     st.markdown("""
     <div class="empty-state-box">
-        ⚖️ Click <strong>Run Comparison</strong> in the sidebar to generate a fair, side-by-side comparison of Round Robin vs Throttled using the same workload (seed=42).
+        ⚖️ Click <strong>Run Comparison</strong> in the sidebar to generate a fair, side-by-side comparison of Round Robin vs Least-Loaded Dynamic using the same workload (seed=42).
     </div>
     """, unsafe_allow_html=True)
 else:
 
     rr = cmp.get(ALGO_RR)
-    th = cmp.get(ALGO_TH)
+    th = cmp.get(ALGO_LEAST_LOADED) or cmp.get("Throttled (Dynamic)")
 
     if rr and th:
         # ── Comparison table ──────────────────────────────────────────────────
         st.markdown("#### 📋 Metrics Summary")
+        src_label = "Google Cluster Trace (clusterdata-2011-2)" if getattr(engine, "workload_source", "synthetic") == "google_trace" else "Synthetic Workload (seed=42)"
+        st.caption(f"**Workload Evaluated:** {src_label} — both algorithms received identical task records and ordering. *(Note: Least-Loaded Dynamic was previously labeled Throttled in this project).*")
         cmp_df_data = {
             "Metric"              : [
                 "Tasks",
@@ -1089,7 +1193,7 @@ else:
                 rr.max_vm_workload,
                 rr.min_vm_workload,
             ],
-            "Throttled (Dynamic)": [
+            "Least-Loaded Dynamic (Existing Variant)": [
                 th.total_tasks,
                 th.active_vm_count,
                 th.total_workload,
@@ -1123,11 +1227,11 @@ else:
         if rr.load_imbalance < th.load_imbalance:
             notes.append(
                 f"🔵 **Round Robin** achieved lower load imbalance ({rr.load_imbalance} units) "
-                f"than Throttled ({th.load_imbalance} units) for this workload."
+                f"than Least-Loaded Dynamic ({th.load_imbalance} units) for this workload."
             )
         elif th.load_imbalance < rr.load_imbalance:
             notes.append(
-                f"🟠 **Throttled** achieved lower load imbalance ({th.load_imbalance} units) "
+                f"🟠 **Least-Loaded Dynamic** achieved lower load imbalance ({th.load_imbalance} units) "
                 f"than Round Robin ({rr.load_imbalance} units) for this workload."
             )
         else:
@@ -1140,7 +1244,7 @@ else:
             )
         elif th.average_response_time < rr.average_response_time:
             notes.append(
-                f"🟠 **Throttled** had a lower average response time "
+                f"🟠 **Least-Loaded Dynamic** had a lower average response time "
                 f"({th.average_response_time:.2f} vs {rr.average_response_time:.2f} tu)."
             )
         else:
@@ -1153,7 +1257,7 @@ else:
             )
         elif th.makespan < rr.makespan:
             notes.append(
-                f"🟠 **Throttled** had a shorter makespan "
+                f"🟠 **Least-Loaded Dynamic** had a shorter makespan "
                 f"({th.makespan:.0f} vs {rr.makespan:.0f} tu)."
             )
         else:
@@ -1170,7 +1274,7 @@ else:
 
         # ── Plotly Charts ─────────────────────────────────────────────────────
         _CHART_COLORS = {"rr": "#3b82f6", "th": "#f97316"}  # blue, orange
-        _ALGO_LABELS  = ["Round Robin", "Throttled"]
+        _ALGO_LABELS  = ["Round Robin", "Least-Loaded Dynamic"]
 
         with st.expander("📊  View Performance Charts", expanded=True):
             ch_col1, ch_col2 = st.columns(2)
@@ -1531,10 +1635,10 @@ else:
         )
     else:
         algo_desc = (
-            "**Throttled failover:** After the failure, the least-load "
+            "**Least-Loaded Dynamic failover:** After the failure, the least-load "
             "selector excluded the failed VM from all subsequent decisions — "
             f"all new tasks were directed to the {fs['final_active_vms']} "
-            "remaining available VMs."
+            "remaining available VMs. (Previously labeled Throttled failover)."
         )
     st.info(algo_desc, icon="ℹ️")
     st.caption(
@@ -1550,7 +1654,8 @@ st.markdown('<p class="section-title">📈  Workload & Scalability Testing</p>',
 
 scal = engine.scalability_results  # List[Dict] | None
 _RR  = "Round Robin (Static)"
-_TH  = "Throttled (Dynamic)"
+_LL  = "Least-Loaded Dynamic (Existing Variant)"
+_TH  = _LL
 _C_RR = "#3b82f6"   # blue
 _C_TH = "#f97316"   # orange
 
@@ -1563,7 +1668,7 @@ if not scal:
 else:
     # ── Derive per-algorithm series ───────────────────────────────────────────
     rr_rows = [r for r in scal if r["algorithm"] == _RR]
-    th_rows = [r for r in scal if r["algorithm"] == _TH]
+    th_rows = [r for r in scal if r["algorithm"] in (_LL, "Throttled (Dynamic)")]
     task_labels_rr = [str(r["tasks"]) for r in rr_rows]
     task_labels_th = [str(r["tasks"]) for r in th_rows]
     # Use the union of tested task counts as x-axis labels
@@ -1615,7 +1720,7 @@ else:
         ))
         fig.add_trace(go.Scatter(
             x=x_labels, y=th_y, mode="lines+markers",
-            name="Throttled", line=dict(color=_C_TH, width=2),
+            name="Least-Loaded Dynamic", line=dict(color=_C_TH, width=2),
             marker=dict(size=8),
         ))
         fig.update_layout(
@@ -1705,7 +1810,7 @@ else:
             interp.append(
                 f"📈 As workload grew from {rr_rows[0]['tasks']} to {rr_rows[-1]['tasks']} tasks: "
                 f"Round Robin avg response time changed by **{rr_rt_delta:+.0f} tu**, "
-                f"Throttled by **{th_rt_delta:+.0f} tu**."
+                f"Least-Loaded Dynamic by **{th_rt_delta:+.0f} tu**."
             )
 
     # Per-level imbalance comparison
@@ -1713,7 +1818,7 @@ else:
         t = rr_r["tasks"]
         if rr_r["load_imbalance"] > th_r["load_imbalance"]:
             interp.append(
-                f"🟠 At **{t} tasks**, Throttled had lower load imbalance "
+                f"🟠 At **{t} tasks**, Least-Loaded Dynamic had lower load imbalance "
                 f"({th_r['load_imbalance']} vs {rr_r['load_imbalance']} units)."
             )
         elif th_r["load_imbalance"] > rr_r["load_imbalance"]:
@@ -1760,13 +1865,14 @@ with st.expander("ℹ️  About This Project", expanded=False):
 
 **Algorithms:**
 - 🔄 **Round Robin (Static)** — Assigns tasks cyclically without considering VM workload.
-- ⚡ **Throttled (Dynamic)** — Assigns each task to the least-loaded available VM.
+- ⚡ **Least-Loaded Dynamic (Existing Variant)** — Assigns each task to the available VM with minimum cumulative workload (previously labeled Throttled).
 
 **Supporting Features:**
 - ⚡ Automated Scaling Listener — adjusts VM count based on workload pressure
 - 📊 Performance Metrics — makespan, response time, throughput, utilization
 - 📈 Workload & Scalability Testing — 10 / 50 / 100 / 500 task progressions
 - 🛡️ VM Failure & Failover — deterministic fault tolerance simulation
+- 🌐 Google Cluster Trace Integration — evaluation on real Google cluster workload data (CC-BY 4.0)
 """)
     with col_b:
         st.markdown("""
@@ -1776,8 +1882,11 @@ with st.expander("ℹ️  About This Project", expanded=False):
 - Elastic scaling (scale-up / scale-down)
 - Fault tolerance via failover (no failed VM receives new tasks)
 - Cyclic Round Robin index continuity across VM failure
+- Trace-informed workload replay on empirical cloud demand distributions
 
-**Terminology:**
+**Workload Sources & Terminology:**
+- *Synthetic Workload* — Configurable mixed distribution (~50% small, 30% medium, 20% large)
+- *Google Cluster Trace* — Empirical task resource requests from official Google Cluster Data 2011-2 (v2.1). Normalized via `clamp(round(CPU_Request * 100), 1, 100)` into simulator processing units
 - *Assigned Workload* — cumulative processing units assigned (not real CPU%)
 - *Cluster Workload Pressure* — total_req ÷ (active_vms × capacity) × 100 (uncapped)
 - *Makespan* — time from start of first task to end of last task on any VM

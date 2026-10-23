@@ -3,7 +3,7 @@ simulation/workload.py — Workload (task) generator.
 
 Generates a configurable list of Tasks with varied sizes so that
 later phases can meaningfully demonstrate the difference between
-static (Round Robin) and dynamic (Throttled) algorithms.
+static (Round Robin) and dynamic (Least-Loaded / previously labeled Throttled) algorithms.
 
 Task sizes follow a realistic mixed distribution:
   - 50% small tasks   (size 10–30)
@@ -12,7 +12,7 @@ Task sizes follow a realistic mixed distribution:
 
 This distribution is intentional: static algorithms like Round Robin
 will not account for the size difference and may overload some VMs,
-while dynamic algorithms like Throttled will handle it better.
+while dynamic algorithms like Least-Loaded Dynamic will handle it better.
 """
 
 import random

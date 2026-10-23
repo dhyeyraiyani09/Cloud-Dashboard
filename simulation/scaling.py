@@ -11,7 +11,7 @@ Architecture
           ↓
     Automated Scaling Listener   ← (this module)
           ↓
-    Load Balancer (Round Robin / Throttled)
+    Load Balancer (Round Robin / Least-Loaded Dynamic)
           ↓
     Active VM Cluster
 

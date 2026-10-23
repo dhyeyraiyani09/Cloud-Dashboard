@@ -1,34 +1,29 @@
 """
-algorithms/throttled.py — Dynamic Throttled Load Balancing Algorithm.
+algorithms/throttled.py — Least-Loaded Dynamic Load Balancing Algorithm (Existing Variant).
 
-Throttled Load Balancing (Dynamic):
-  For each incoming task, the scheduler consults a VM state table to find
-  the currently least-loaded available VM and assigns the task there.
+Historical Context & Academic Note:
+  In earlier versions of this project, this algorithm was labeled "Throttled (Dynamic)".
+  Following an academic correctness audit, it is noted that this implementation does
+  NOT implement the traditional availability-table, first-available Throttled algorithm
+  (as originally formulated in CloudAnalyst / CloudSim by Wickremasinghe et al., 2010).
 
-  This is a DYNAMIC algorithm because:
-    - The assignment decision changes at every step.
-    - It inspects VM current_load (cumulative assigned processing units)
-      before each assignment rather than following a fixed cycle.
-    - A VM that has received several large tasks will be passed over in
-      favour of a VM with lower accumulated load.
+  Instead, this algorithm implements a greedy Least-Loaded (minimum current load)
+  dynamic scheduling policy:
+    - For each incoming task, the scheduler inspects the current cumulative workload
+      (current_load) across all available (non-failed) VMs.
+    - It assigns the task to the available VM with the lowest current_load:
+        vm = min(available_vms, key=lambda v: (v.current_load, v.vm_id))
+    - It does not maintain a binary availability table or throttle/queue
+      tasks when VMs are busy.
 
-  Contrast with Round Robin (Static):
-    - Round Robin uses  vm = vms[index % n]  — no load inspection.
-    - Throttled uses    vm = min(available_vms, key=lambda v: v.current_load)
+  To maintain compatibility with existing tests and internal callers, the module
+  and function names (`run_throttled`, `validate_throttled`) are preserved, while
+  user-facing labels and descriptions identify it as:
+  "Least-Loaded Dynamic (Existing Variant)".
 
-  Example with 4 VMs and heterogeneous task sizes:
-    Before T-1:  loads = [0,  0,  0,  0]  → pick VM-1 (tie, first wins)
-    After  T-1 (size=80):  [80, 0,  0,  0]
-    Before T-2:  loads = [80, 0,  0,  0]  → pick VM-2
-    After  T-2 (size=15):  [80, 15, 0,  0]
-    Before T-3:  loads = [80, 15, 0,  0]  → pick VM-3
-    After  T-3 (size=60):  [80, 15, 60, 0]
-    Before T-4:  loads = [80, 15, 60, 0]  → pick VM-4
-    After  T-4 (size=10):  [80, 15, 60, 10]
-    Before T-5:  loads = [80, 15, 60, 10] → pick VM-2  ← different from RR!
-    ...
-
-  With Round Robin, T-5 would always go to VM-1 regardless of its load of 80.
+Contrast with Round Robin (Static):
+  - Round Robin uses  vm = vms[index % n]  — cyclic, no load inspection.
+  - Least-Loaded uses vm = min(available_vms, key=lambda v: (v.current_load, v.vm_id))
 
 Usage (called by SimulationEngine.run_algorithm()):
   from algorithms.throttled import run_throttled
@@ -43,8 +38,9 @@ from simulation.vm   import VM,   STATUS_BUSY, STATUS_FAILED
 from simulation.task import Task, STATUS_COMPLETED
 
 
-# ── Algorithm identifier ──────────────────────────────────────────────────────
-ALGORITHM_NAME = "Throttled (Dynamic)"
+# ── Algorithm identifiers (Primary label & backward compatibility alias) ──────
+ALGORITHM_NAME        = "Least-Loaded Dynamic (Existing Variant)"
+LEGACY_ALGORITHM_NAME = "Throttled (Dynamic)"
 
 
 def run_throttled(vms: List[VM], tasks: List[Task]) -> Dict[str, Any]:
@@ -131,12 +127,13 @@ def run_throttled(vms: List[VM], tasks: List[Task]) -> Dict[str, Any]:
     vm_total_loads = {v.name: v.current_load for v in available_vms}
 
     return {
-        "algorithm"      : ALGORITHM_NAME,
-        "total_tasks"    : len(tasks),
-        "total_vms"      : len(available_vms),
-        "assignment_log" : assignment_log,
-        "vm_task_counts" : vm_task_counts,
-        "vm_total_loads" : vm_total_loads,
+        "algorithm"        : ALGORITHM_NAME,
+        "legacy_algorithm" : LEGACY_ALGORITHM_NAME,
+        "total_tasks"      : len(tasks),
+        "total_vms"        : len(available_vms),
+        "assignment_log"   : assignment_log,
+        "vm_task_counts"   : vm_task_counts,
+        "vm_total_loads"   : vm_total_loads,
     }
 
 

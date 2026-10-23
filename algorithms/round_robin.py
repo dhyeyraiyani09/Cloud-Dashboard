@@ -20,7 +20,7 @@ Usage (called by SimulationEngine.run_algorithm()):
 The function operates directly on the shared VM and Task objects stored
 in the engine, so all changes are immediately reflected in the dashboard.
 
-Phase 4 will add: algorithms/throttled.py (Dynamic Throttled algorithm)
+Phase 4: algorithms/throttled.py (Least-Loaded Dynamic algorithm, previously labeled Throttled)
 """
 
 from typing import List, Dict, Any

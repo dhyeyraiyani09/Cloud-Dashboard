@@ -4,7 +4,7 @@ simulation/vm.py — Virtual Machine model.
 Defines the VM dataclass used throughout the simulation.
 This model is algorithm-agnostic and will be used by:
   - Phase 3: Round Robin
-  - Phase 4: Throttled
+  - Phase 4: Least-Loaded Dynamic (previously labeled Throttled)
   - Phase 5: Automated Scaling Listener
   - Phase 8: VM Failure & Failover
 """

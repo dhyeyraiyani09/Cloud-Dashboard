@@ -94,7 +94,7 @@ class FailoverManager:
         --------------------------------
         For Round Robin, Phase B is called with start_index=fail_at so the
         scheduler continues from its current cyclic position rather than
-        restarting at index 0.  Throttled is unaffected (it inspects load
+        restarting at index 0.  Least-Loaded Dynamic is unaffected (it inspects load
         per task, not a positional index).
 
         Graceful all-VMs-failed handling (Fix 2)
@@ -204,7 +204,7 @@ class FailoverManager:
             try:
                 # For Round Robin: pass start_index=fail_at to continue the cycle
                 # from where Phase A stopped (Fix 1).
-                # For Throttled: call normally (algo inspects load each task).
+                # For Least-Loaded Dynamic (Throttled): call normally (algo inspects load each task).
                 if is_rr:
                     res_b = algo_fn(vms, tasks_b, start_index=fail_at)
                 else:

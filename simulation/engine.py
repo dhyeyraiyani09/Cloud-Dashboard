@@ -71,11 +71,15 @@ class SimulationEngine:
         self.comparison_results: Optional[Dict] = None  # Phase 6
         self.scalability_results: Optional[List]= None  # Phase 7
         self.failover_manager                   = None  # FailoverManager | None  (Phase 8)
+        self.workload_source   : str            = "synthetic"
+        self.trace_parse_result                 = None  # TraceParseResult | None (Phase 11)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def initialize(self, num_vms: int, num_tasks: int, algorithm: str,
-                   vm_capacity: int = 100, seed: int = 42) -> None:
+                   vm_capacity: int = 100, seed: int = 42,
+                   custom_tasks: Optional[List[Task]] = None,
+                   workload_source: str = "synthetic") -> None:
         self.num_vms          = num_vms
         self.num_tasks        = num_tasks
         self.algorithm        = algorithm
@@ -84,9 +88,20 @@ class SimulationEngine:
         self.scaling_listener = None
         self.current_metrics  = None
         self.comparison_results = None
+        self.workload_source  = workload_source
 
         self.vms   = create_vms(num_vms, base_capacity=vm_capacity)
-        self.tasks = generate_tasks(num_tasks, seed=seed)
+        if custom_tasks is not None:
+            import copy
+            self.tasks = copy.deepcopy(custom_tasks[:num_tasks])
+            for idx, t in enumerate(self.tasks):
+                t.task_id = idx + 1
+                t.name = f"T-{idx + 1}"
+                t.arrival_order = idx + 1
+                t.reset()
+            self.num_tasks = len(self.tasks)
+        else:
+            self.tasks = generate_tasks(num_tasks, seed=seed)
         self.status = SIM_READY
 
     def run_scaling(
@@ -126,7 +141,7 @@ class SimulationEngine:
         if "round robin" in algo:
             from algorithms.round_robin import run_round_robin
             result = run_round_robin(self.vms, self.tasks)
-        elif "throttled" in algo:
+        elif "throttled" in algo or "least-loaded" in algo or "least loaded" in algo:
             from algorithms.throttled import run_throttled
             result = run_throttled(self.vms, self.tasks)
         else:
@@ -159,12 +174,13 @@ class SimulationEngine:
         scale_down_threshold : float = 30.0,
         min_vms              : int   = 2,
         max_vms              : int   = 10,
+        custom_tasks         : Optional[List[Task]] = None,
     ) -> Dict:
         """
         Phase 6 — Run both algorithms on an IDENTICAL workload and compare.
 
         Both algorithms receive:
-          - Same canonical task list (deep copied from seed-deterministic generation)
+          - Same canonical task list (deep copied from seed-deterministic generation or trace)
           - Same initial VM count
           - Same scaling thresholds (when scaling_enabled=True)
           - Same VM capacity
@@ -182,10 +198,19 @@ class SimulationEngine:
         from simulation.scaling     import AutoScalingListener
 
         ALGO_RR = "Round Robin (Static)"
-        ALGO_TH = "Throttled (Dynamic)"
+        ALGO_TH = "Least-Loaded Dynamic (Existing Variant)"
+        ALGO_TH_LEGACY = "Throttled (Dynamic)"
 
         # ── Generate ONE canonical task list ───────────────────────────────────
-        canonical_tasks = generate_tasks(num_tasks, seed=seed)
+        if custom_tasks is not None:
+            canonical_tasks = copy.deepcopy(custom_tasks[:num_tasks])
+            for idx, t in enumerate(canonical_tasks):
+                t.task_id = idx + 1
+                t.name = f"T-{idx + 1}"
+                t.arrival_order = idx + 1
+                t.reset()
+        else:
+            canonical_tasks = generate_tasks(num_tasks, seed=seed)
 
         scaling_kwargs = dict(
             scale_up_threshold   = scale_up_threshold,
@@ -214,6 +239,9 @@ class SimulationEngine:
             m = self._compute_metrics_from_state(tmp_vms, tmp_tasks, algo_name)
             comparison[algo_name] = m
 
+        # Backward compatibility alias for legacy tests and callers
+        comparison[ALGO_TH_LEGACY] = comparison[ALGO_TH]
+
         self.comparison_results = comparison
         return comparison
 
@@ -236,6 +264,7 @@ class SimulationEngine:
         scale_down_threshold : float     = 30.0,
         min_vms              : int       = 2,
         max_vms              : int       = 10,
+        custom_tasks         : Optional[List[Task]] = None,
     ) -> List[Dict]:
         """
         Phase 7 — Workload & Scalability Testing.
@@ -281,7 +310,8 @@ class SimulationEngine:
             task_counts = [10, 50, 100, 500]
 
         ALGO_RR = "Round Robin (Static)"
-        ALGO_TH = "Throttled (Dynamic)"
+        ALGO_TH = "Least-Loaded Dynamic (Existing Variant)"
+        ALGO_TH_LEGACY = "Throttled (Dynamic)"
 
         scaling_kwargs = dict(
             scale_up_threshold   = scale_up_threshold,
@@ -295,7 +325,15 @@ class SimulationEngine:
 
         for n_tasks in task_counts:
             # ── Generate ONE canonical task list for this workload size ────────
-            canonical_tasks = generate_tasks(n_tasks, seed=seed)
+            if custom_tasks is not None:
+                canonical_tasks = copy.deepcopy(custom_tasks[:n_tasks])
+                for idx, t in enumerate(canonical_tasks):
+                    t.task_id = idx + 1
+                    t.name = f"T-{idx + 1}"
+                    t.arrival_order = idx + 1
+                    t.reset()
+            else:
+                canonical_tasks = generate_tasks(n_tasks, seed=seed)
 
             for algo_name, algo_fn in [(ALGO_RR, run_round_robin), (ALGO_TH, run_throttled)]:
                 tmp_vms   = create_vms(num_vms, base_capacity=vm_capacity)
@@ -386,7 +424,7 @@ class SimulationEngine:
         if "round robin" in algo:
             from algorithms.round_robin import run_round_robin
             algo_fn = run_round_robin
-        elif "throttled" in algo:
+        elif "throttled" in algo or "least-loaded" in algo or "least loaded" in algo:
             from algorithms.throttled import run_throttled
             algo_fn = run_throttled
         else:
@@ -410,7 +448,7 @@ class SimulationEngine:
         return result
 
     def reset(self) -> None:
-        """Clear all simulation and metrics state (Phases 1–8)."""
+        """Clear all simulation and metrics state (Phases 1–11)."""
         self.vms                = []
         self.tasks              = []
         self.status             = SIM_NOT_STARTED
@@ -423,6 +461,8 @@ class SimulationEngine:
         self.comparison_results = None    # Phase 6
         self.scalability_results = None   # Phase 7
         self.failover_manager   = None    # Phase 8
+        self.workload_source    = "synthetic"
+        self.trace_parse_result = None
 
 
     # ── Metrics (computed from current state) ─────────────────────────────────
@@ -507,4 +547,5 @@ class SimulationEngine:
             "completed_tasks" : self.completed_tasks,
             "workload_percent": self.workload_percent,
             "algorithm"       : self.algorithm,
+            "workload_source" : getattr(self, "workload_source", "synthetic"),
         }

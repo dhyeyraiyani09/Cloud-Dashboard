@@ -39,6 +39,13 @@ class Task:
     arrival_order  : int
     assigned_vm_id : Optional[int] = None
     status         : str           = STATUS_PENDING
+    source         : str           = "synthetic"
+    job_id         : Optional[int] = None
+    task_index     : Optional[int] = None
+    timestamp      : Optional[int] = None
+    raw_cpu_request: Optional[float] = None
+    raw_mem_request: Optional[float] = None
+    priority       : Optional[int] = None
 
     # ── State mutation helpers ─────────────────────────────────────────────────
 
@@ -62,7 +69,7 @@ class Task:
     def to_dict(self) -> dict:
         """Serialise Task to a plain dictionary (useful for display tables)."""
         vm_label = f"VM-{self.assigned_vm_id}" if self.assigned_vm_id else "—"
-        return {
+        d = {
             "Task"        : self.name,
             "Size"        : self.size,
             "Proc. Units" : self.processing_req,
@@ -70,3 +77,7 @@ class Task:
             "Status"      : self.status,
             "Assigned VM" : vm_label,
         }
+        if self.source == "google_trace":
+            d["Job ID"] = self.job_id if self.job_id is not None else "—"
+            d["Raw CPU"] = f"{self.raw_cpu_request:.4f}" if self.raw_cpu_request is not None else "—"
+        return d
