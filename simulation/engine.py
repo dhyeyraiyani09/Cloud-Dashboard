@@ -70,6 +70,10 @@ class SimulationEngine:
         self.current_metrics                    = None  # PerformanceMetrics | None
         self.comparison_results: Optional[Dict] = None  # Phase 6
         self.comparison_tasks  : Optional[Dict] = None  # Phase 14.1 Task records from comparison
+        self.comparison_workload_source: Optional[str] = None  # Workload source of last comparison
+        self.comparison_trace_mode     : Optional[str] = None  # Trace mode of last comparison
+        self.comparison_seed           : Optional[int] = None  # Seed of last comparison
+        self.comparison_workload_label : Optional[str] = None  # Formatted label of last comparison
         self.scalability_results: Optional[List]= None  # Phase 7
         self.failover_manager                   = None  # FailoverManager | None  (Phase 8)
         self.workload_source   : str            = "synthetic"
@@ -90,6 +94,10 @@ class SimulationEngine:
         self.current_metrics  = None
         self.comparison_results = None
         self.comparison_tasks   = None
+        self.comparison_workload_source = None
+        self.comparison_trace_mode      = None
+        self.comparison_seed            = None
+        self.comparison_workload_label  = None
         self.workload_source  = workload_source
 
         self.vms   = create_vms(num_vms, base_capacity=vm_capacity)
@@ -189,6 +197,8 @@ class SimulationEngine:
         min_vms              : int   = 2,
         max_vms              : int   = 10,
         custom_tasks         : Optional[List[Task]] = None,
+        workload_source      : Optional[str] = None,
+        trace_mode           : Optional[str] = None,
     ) -> Dict:
         """
         Phase 6 — Run both algorithms on an IDENTICAL workload and compare.
@@ -273,9 +283,77 @@ class SimulationEngine:
         comparison_tasks[ALGO_TH_LEGACY] = comparison_tasks[ALGO_TH]
         comparison_tasks["PAALB"] = comparison_tasks[ALGO_PAALB]
 
-        self.comparison_results = comparison
-        self.comparison_tasks   = comparison_tasks
+        # Determine comparison workload metadata
+        is_trace = (
+            (workload_source is not None and "trace" in str(workload_source).lower())
+            or (custom_tasks is not None and any(getattr(t, "source", "") == "google_trace" for t in canonical_tasks))
+        )
+        if is_trace:
+            resolved_source = "google_trace"
+            if trace_mode:
+                tm = str(trace_mode).lower()
+                if "snapshot" in tm:
+                    resolved_mode = "Snapshot Trace"
+                elif "staggered" in tm:
+                    resolved_mode = "Staggered Trace"
+                elif "custom" in tm or "upload" in tm:
+                    resolved_mode = "Custom Upload Trace"
+                else:
+                    resolved_mode = trace_mode
+            else:
+                has_staggered = any(getattr(t, "arrival_time", 0.0) > 0 for t in canonical_tasks)
+                resolved_mode = "Staggered Trace" if has_staggered else "Snapshot Trace"
+            resolved_seed = None
+            if resolved_mode == "Custom Upload Trace":
+                resolved_label = "Google Cluster Trace (Custom Upload Trace)"
+            else:
+                resolved_label = f"Google Cluster Trace (clusterdata-2011-2, {resolved_mode})"
+        elif custom_tasks is not None:
+            resolved_source = "custom"
+            resolved_mode = None
+            resolved_seed = None
+            resolved_label = f"Custom Workload ({len(canonical_tasks)} tasks)"
+        else:
+            resolved_source = "synthetic"
+            resolved_mode = None
+            resolved_seed = seed
+            resolved_label = f"Synthetic Workload (seed={seed})"
+
+        self.comparison_results         = comparison
+        self.comparison_tasks           = comparison_tasks
+        self.comparison_workload_source = resolved_source
+        self.comparison_trace_mode      = resolved_mode
+        self.comparison_seed            = resolved_seed
+        self.comparison_workload_label  = resolved_label
         return comparison
+
+    def get_comparison_workload_label(self) -> Optional[str]:
+        """
+        Return the descriptive workload label for the saved comparison results,
+        indicating the source and mode (Staggered Trace or Snapshot Trace) for
+        Google Cluster Trace, or the synthetic source and seed for Synthetic Workload.
+        """
+        if not self.comparison_results:
+            return None
+        if getattr(self, "comparison_workload_label", None):
+            return self.comparison_workload_label
+
+        # Dynamic fallback derived from saved comparison tasks
+        if getattr(self, "comparison_tasks", None):
+            sample_tasks = next(iter(self.comparison_tasks.values()), None)
+            if sample_tasks:
+                is_trace = any(getattr(t, "source", "") == "google_trace" for t in sample_tasks)
+                if is_trace:
+                    has_staggered = any(getattr(t, "arrival_time", 0.0) > 0 for t in sample_tasks)
+                    mode = "Staggered Trace" if has_staggered else "Snapshot Trace"
+                    return f"Google Cluster Trace (clusterdata-2011-2, {mode})"
+                else:
+                    seed_val = getattr(self, "comparison_seed", None) or 42
+                    return f"Synthetic Workload (seed={seed_val})"
+
+        if getattr(self, "workload_source", "synthetic") == "google_trace":
+            return "Google Cluster Trace (clusterdata-2011-2, Staggered Trace)"
+        return "Synthetic Workload (seed=42)"
 
     def get_priority_tier_comparison(self) -> Optional[List[Dict[str, Any]]]:
         """
@@ -604,6 +682,10 @@ class SimulationEngine:
         self.current_metrics    = None    # Phase 6
         self.comparison_results = None    # Phase 6
         self.comparison_tasks   = None    # Phase 14.1
+        self.comparison_workload_source = None
+        self.comparison_trace_mode      = None
+        self.comparison_seed            = None
+        self.comparison_workload_label  = None
         self.scalability_results = None   # Phase 7
         self.failover_manager   = None    # Phase 8
         self.workload_source    = "synthetic"

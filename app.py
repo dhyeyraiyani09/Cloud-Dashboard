@@ -183,12 +183,18 @@ body { font-family: 'Segoe UI', sans-serif; }
 # ─────────────────────────────────────────────────────────────────────────────
 if "engine" not in st.session_state:
     st.session_state.engine = SimulationEngine()
-elif not hasattr(st.session_state.engine, "get_priority_tier_comparison") or not isinstance(st.session_state.engine, SimulationEngine):
+elif (
+    not hasattr(st.session_state.engine, "get_priority_tier_comparison")
+    or not hasattr(st.session_state.engine, "get_comparison_workload_label")
+    or not isinstance(st.session_state.engine, SimulationEngine)
+):
     # Recover stale instance from pre-update session across hot-reloads / deployments
     try:
         st.session_state.engine.__class__ = SimulationEngine
         if not hasattr(st.session_state.engine, "comparison_tasks"):
             st.session_state.engine.comparison_tasks = None
+        if not hasattr(st.session_state.engine, "comparison_workload_label"):
+            st.session_state.engine.comparison_workload_label = None
     except Exception:
         st.session_state.engine = SimulationEngine()
 
@@ -484,6 +490,15 @@ with st.sidebar:
             st.error("Cannot run comparison: No valid Google Cluster Trace loaded.")
         else:
             try:
+                cmp_trace_mode = None
+                if workload_source == "Google Cluster Trace":
+                    if trace_mode and "snapshot" in trace_mode.lower():
+                        cmp_trace_mode = "Snapshot Trace"
+                    elif trace_mode and "staggered" in trace_mode.lower():
+                        cmp_trace_mode = "Staggered Trace"
+                    else:
+                        cmp_trace_mode = "Custom Upload Trace"
+
                 engine.run_comparison(
                     num_vms              = cmp_vms,
                     num_tasks            = cmp_tasks,
@@ -495,8 +510,14 @@ with st.sidebar:
                     min_vms              = min_vms_cfg,
                     max_vms              = max_vms_cfg,
                     custom_tasks         = trace_tasks if workload_source == "Google Cluster Trace" else None,
+                    workload_source      = "google_trace" if workload_source == "Google Cluster Trace" else "synthetic",
+                    trace_mode           = cmp_trace_mode,
                 )
-                src_note = "Google Cluster Trace" if workload_source == "Google Cluster Trace" else "seed=42"
+                src_note = (
+                    f"Google Cluster Trace ({cmp_trace_mode})"
+                    if workload_source == "Google Cluster Trace"
+                    else "seed=42"
+                )
                 st.success(
                     f"✅ Comparison complete! ({cmp_vms} VMs, {cmp_tasks} tasks, {src_note}, "
                     f"scaling={'ON' if scaling_enabled else 'OFF'})"
@@ -1294,7 +1315,14 @@ else:
     if rr and th:
         # ── Comparison table ──────────────────────────────────────────────────
         st.markdown("#### 📋 Metrics Summary")
-        src_label = "Google Cluster Trace (clusterdata-2011-2)" if getattr(engine, "workload_source", "synthetic") == "google_trace" else "Synthetic Workload (seed=42)"
+        if hasattr(engine, "get_comparison_workload_label"):
+            src_label = engine.get_comparison_workload_label()
+        else:
+            src_label = getattr(engine, "comparison_workload_label", None) or (
+                "Google Cluster Trace (clusterdata-2011-2, Staggered Trace)"
+                if getattr(engine, "workload_source", "synthetic") == "google_trace"
+                else "Synthetic Workload (seed=42)"
+            )
         st.caption(f"**Workload Evaluated:** {src_label} — all algorithms received identical task records and ordering. *(Note: Least-Loaded Dynamic was previously labeled Throttled in this project).*")
 
         metrics_list = [
