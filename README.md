@@ -16,7 +16,8 @@ Cloud Project/
 │   ├── __init__.py
 │   ├── round_robin.py      # [Phase 3] Static Round Robin
 │   ├── throttled.py        # [Phase 4] Least-Loaded Dynamic (previously labeled Throttled)
-│   └── traditional_throttled.py # [Phase 12] Traditional Throttled baseline (CloudAnalyst)
+│   ├── traditional_throttled.py # [Phase 12] Traditional Throttled baseline (CloudAnalyst)
+│   └── paalb.py            # [Phase 14] Priority-Aware Adaptive Load Balancer (PAALB)
 │
 ├── simulation/             # Simulation engine and helpers
 │   ├── __init__.py
@@ -77,6 +78,8 @@ Opens at **http://localhost:8501**
 | **Phase 11** | ✅ Complete | Google Cluster Trace workload integration |
 | **Phase 12** | ✅ Complete | Traditional Throttled baseline (CloudAnalyst availability table & FIFO queue) |
 | **Phase 12.1** | ✅ Complete | Trace timing alignment (staggered arrivals) & fair algorithm comparisons |
+| **Phase 13 / 13.1** | ✅ Complete | PAALB algorithm design, scratch prototype & rigorous arithmetic audit |
+| **Phase 14** | ✅ Complete | Proposed Priority-Aware Adaptive Load Balancer (PAALB) full integration |
 
 ---
 
@@ -102,6 +105,35 @@ Implements the canonical availability-table baseline:
 4. **Throttled FIFO Queue:** If all VMs are `BUSY`, the task enters a FIFO waiting queue.
 5. **Freed VM Queue Dispatch:** Upon task completion, the VM transitions back to `AVAILABLE` and immediately pulls the next waiting task from the FIFO queue.
 6. **Discrete-Event Service Model:** Simulated execution durations are deterministically derived from normalized processing units ($\text{service\_time} = \text{processing\_req} / \text{processing\_rate}$) to accurately model queueing delays, waiting times, and turnaround times ($\text{Response Time} = \text{Waiting Time} + \text{Service Time}$). Deterministic tie-breaking by VM ID handles simultaneous completions.
+
+### Dynamic — Priority-Aware Adaptive Load Balancer (PAALB) (Phase 14)
+*Academic & Design Description:* An original proposed heuristic designed for multi-tenant, heterogeneous cloud workloads with service-level priority tiers (such as Google Cluster Data). While Traditional Throttled treats all queued requests identically in a First-In, First-Out (FIFO) queue, PAALB dynamically re-scores waiting tasks using a composite utility function.
+
+1. **Multi-Criteria Scoring Formula:**
+   $$S(t, \tau) = w_p \cdot P_{\text{norm}}(t) + w_s \cdot L_{\text{norm}}(t) + w_a \cdot A(t, \tau)$$
+   where:
+   - **$P_{\text{norm}}(t) = \text{clamp}(p, 0, 11) / 11$**: Normalized task priority (from Google Cluster Trace priority tiers 0–11).
+   - **$L_{\text{norm}}(t) = \text{clamp}\left(\frac{100 - s}{99}, 0, 1\right)$**: Normalized inverse service length (rewards shorter tasks to improve system turnaround time, inspired by Shortest Job First).
+   - **$A(t, \tau) = \frac{\max(0, \tau - t_{\text{arr}})}{T_{\text{ref}}}$**: Normalized queue waiting time relative to a reference horizon ($T_{\text{ref}} = 10.0$ tu).
+   - **Default Calibrated Weights**: $w_p = 0.45$ (priority weight), $w_s = 0.35$ (task length weight), $w_a = 0.20$ (aging weight), with $w_p + w_s + w_a = 1.0$.
+
+2. **Least-Loaded VM Selection:**
+   When a VM completes execution or when an idle VM is available at time $\tau$, all pending tasks are scored. The task with highest score $S(t, \tau)$ is selected (with deterministic tie-breaking: earliest arrival, then lowest `task_id`). The selected task is dispatched to the available VM with minimum cumulative workload: $\arg\min_{v \in \text{Avail}} (v.\text{current\_load}, v.\text{vm\_id})$.
+
+3. **Dynamic Aging & Priority Overtaking Horizon:**
+   To mitigate prolonged queuing of lower-priority tasks when high-priority streams arrive, the aging term increases monotonically with queue waiting time. An aged lowest-priority task ($p=0$) overtakes a newly arriving highest-priority task ($p=11$) once its waiting time reaches:
+   $$\Delta t_{\text{overtake}} = \frac{w_p + w_s}{w_a} \cdot T_{\text{ref}} = \frac{0.45 + 0.35}{0.20} \times 10.0 = 40.0 \text{ time units}$$
+   *Academic Scoping Note:* This 40-unit threshold mathematically functions as an **overtaking horizon relative to newly arriving tasks** in the candidate pool, rather than an unconditional mathematical guarantee against queue delay in saturated clusters. Complete absence of starvation (bounded queue delay) is an **observed empirical result on the finite trace workload**, not an unconditional theoretical guarantee under arbitrary or unbounded arrival streams.
+
+4. **Non-Preemptive Execution:**
+   Once scheduled to an available VM, tasks execute to full completion without preemption.
+
+5. **Empirical Performance on Google Trace (500 tasks, 4 VMs):**
+   - **Makespan:** $383.00$ tu (identical to Traditional Throttled and Least-Loaded Dynamic; cluster utilization $99.74\%$).
+   - **Official Production Tier (Priorities 9–11, 52 tasks):** Mean response time reduced from **145.73 tu** (Traditional Throttled) to **50.43 tu** (**65.4% reduction**).
+   - **High-Priority Experimental Group (Priorities 8–11, 55 tasks):** Mean response time reduced from **151.77 tu** (Traditional Throttled) to **60.12 tu** (**60.4% reduction**).
+   - **Low-Priority Group (Priorities 0–2, 445 tasks):** Mean response time remains stable at **174.82 tu** (vs **172.12 tu** in Traditional Throttled, a modest $+1.57\%$ trade-off) with observed bounded queue delay (maximum wait $263.55$ tu vs $262.05$ tu in Traditional Throttled).
+   - **Overall Cluster Avg Response Time:** Reduced from $169.88$ tu to $162.20$ tu (a $4.5\%$ cluster-wide improvement).
 
 ---
 

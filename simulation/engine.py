@@ -141,6 +141,9 @@ class SimulationEngine:
         if "round robin" in algo:
             from algorithms.round_robin import run_round_robin
             result = run_round_robin(self.vms, self.tasks)
+        elif "paalb" in algo or "priority" in algo:
+            from algorithms.paalb import run_paalb
+            result = run_paalb(self.vms, self.tasks)
         elif "traditional" in algo:
             from algorithms.traditional_throttled import run_traditional_throttled
             result = run_traditional_throttled(self.vms, self.tasks)
@@ -205,11 +208,13 @@ class SimulationEngine:
         from algorithms.round_robin import run_round_robin
         from algorithms.throttled   import run_throttled
         from algorithms.traditional_throttled import run_traditional_throttled
+        from algorithms.paalb       import run_paalb
         from simulation.scaling     import AutoScalingListener
 
         ALGO_RR = "Round Robin (Static)"
         ALGO_TH = "Least-Loaded Dynamic (Existing Variant)"
         ALGO_TT = "Traditional Throttled"
+        ALGO_PAALB = "Priority-Aware Adaptive (PAALB)"
         ALGO_TH_LEGACY = "Throttled (Dynamic)"
 
         # ── Generate ONE canonical task list ───────────────────────────────────
@@ -237,6 +242,7 @@ class SimulationEngine:
             (ALGO_RR, run_round_robin),
             (ALGO_TH, run_throttled),
             (ALGO_TT, run_traditional_throttled),
+            (ALGO_PAALB, run_paalb),
         ]:
             # Fresh VMs and a deep copy of the canonical tasks
             tmp_vms   = create_vms(num_vms, base_capacity=vm_capacity)
@@ -259,6 +265,7 @@ class SimulationEngine:
 
         # Backward compatibility alias for legacy tests and callers
         comparison[ALGO_TH_LEGACY] = comparison[ALGO_TH]
+        comparison["PAALB"] = comparison[ALGO_PAALB]
 
         self.comparison_results = comparison
         return comparison
@@ -269,7 +276,8 @@ class SimulationEngine:
     def _compute_metrics_from_state(vms, tasks, algorithm: str):
         """Delegate to simulation.metrics.compute_metrics() or compute_discrete_event_metrics()."""
         from simulation.metrics import compute_metrics, compute_discrete_event_metrics
-        if "traditional" in algorithm.lower():
+        algo = algorithm.lower()
+        if "traditional" in algo or "paalb" in algo or "priority" in algo:
             return compute_discrete_event_metrics(vms, tasks, algorithm)
         return compute_metrics(vms, tasks, algorithm)
 
@@ -286,9 +294,10 @@ class SimulationEngine:
         max_vms              : int       = 10,
         custom_tasks         : Optional[List[Task]] = None,
         include_traditional  : bool      = False,
+        include_paalb        : bool      = False,
     ) -> List[Dict]:
         """
-        Phase 7 & Phase 12 — Workload & Scalability Testing.
+        Phase 7, Phase 12 & Phase 14 — Workload & Scalability Testing.
 
         Runs algorithms across multiple workload sizes on IDENTICAL
         canonical task lists.  For each workload size:
@@ -312,6 +321,7 @@ class SimulationEngine:
         max_vms              : Maximum VMs the listener will scale to
         custom_tasks         : Optional external task list (e.g. Google Cluster Trace)
         include_traditional  : Include Traditional Throttled in comparison (default: False for backward compatibility)
+        include_paalb        : Include PAALB in comparison (default: False for backward compatibility)
 
         Returns
         -------
@@ -335,12 +345,16 @@ class SimulationEngine:
         ALGO_RR = "Round Robin (Static)"
         ALGO_TH = "Least-Loaded Dynamic (Existing Variant)"
         ALGO_TT = "Traditional Throttled"
+        ALGO_PAALB = "Priority-Aware Adaptive (PAALB)"
         ALGO_TH_LEGACY = "Throttled (Dynamic)"
 
         algos = [(ALGO_RR, run_round_robin), (ALGO_TH, run_throttled)]
         if include_traditional:
             from algorithms.traditional_throttled import run_traditional_throttled
             algos.append((ALGO_TT, run_traditional_throttled))
+        if include_paalb:
+            from algorithms.paalb import run_paalb
+            algos.append((ALGO_PAALB, run_paalb))
 
         scaling_kwargs = dict(
             scale_up_threshold   = scale_up_threshold,
@@ -459,6 +473,9 @@ class SimulationEngine:
         elif "traditional" in algo:
             from algorithms.traditional_throttled import run_traditional_throttled
             algo_fn = run_traditional_throttled
+        elif "paalb" in algo or "priority" in algo:
+            from algorithms.paalb import run_paalb
+            algo_fn = run_paalb
         elif "throttled" in algo or "least-loaded" in algo or "least loaded" in algo:
             from algorithms.throttled import run_throttled
             algo_fn = run_throttled

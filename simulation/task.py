@@ -67,10 +67,9 @@ class Task:
         self.status = STATUS_COMPLETED
 
     def reset(self) -> None:
-        """Reset task to its initial Pending state."""
+        """Reset task execution state to initial Pending state."""
         self.assigned_vm_id = None
         self.status = STATUS_PENDING
-        self.arrival_time = 0.0
         self.start_time = None
         self.completion_time = None
         self.waiting_time = None
