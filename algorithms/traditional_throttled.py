@@ -213,6 +213,7 @@ def run_traditional_throttled(
             "task_id"        : task.task_id,
             "task_name"      : task.name,
             "processing_req" : task.processing_req,
+            "priority"       : getattr(task, "priority", 0) or 0,
             "vm_id"          : vm.vm_id,
             "vm_name"        : vm.name,
             "arrival_time"   : task.arrival_time,

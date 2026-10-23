@@ -1376,6 +1376,27 @@ else:
             hide_index=True,
         )
 
+        # ── Priority-Tier Performance Comparison (Phase 14.1) ─────────────────
+        pt_rows = engine.get_priority_tier_comparison()
+        if pt_rows and tt and pa:
+            st.markdown("#### 🎯 Priority-Tier Performance Comparison (Traditional Throttled vs PAALB)")
+            has_trace_priorities = any(r["Task Count"] > 0 for r in pt_rows)
+            if has_trace_priorities:
+                st.caption(
+                    "Dynamic turnaround comparison evaluated directly from task execution records across official Google Cluster Trace priority tiers. "
+                    "Reductions in response time reflect SLA improvements; increases reflect trade-offs on batch workloads."
+                )
+            else:
+                st.caption(
+                    "ℹ️ Priority tiers require workload priority metadata (available with Google Cluster Trace). "
+                    "Synthetic tasks lack priority tiers and display as N/A."
+                )
+            st.dataframe(
+                pd.DataFrame(pt_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+
         # ── Interpretation ────────────────────────────────────────────────────
         st.markdown("#### 🔍 Interpretation")
         notes = []
@@ -1413,12 +1434,32 @@ else:
             )
 
         if pa:
-            notes.append(
+            pa_note = (
                 f"🟣 **Priority-Aware Adaptive (PAALB)**: makespan = {pa.makespan:.2f} tu, "
                 f"avg response time = {pa.average_response_time:.2f} tu "
-                f"(avg queue wait = {pa.average_waiting_time:.2f} tu across {pa.queued_task_count} queued tasks). "
-                f"PAALB uses multi-criteria scoring to prioritize latency-sensitive workloads—reducing turnaround time for the official Production Tier (priorities 9–11) by 65.4% (50.43 vs 145.73 tu) and the High-Priority Experimental Group (priorities 8–11) by 60.4% (60.12 vs 151.77 tu)—while dynamic aging establishes a 40-unit overtaking horizon relative to new arrivals (empirically yielding bounded queue delays across the finite trace)."
+                f"(avg queue wait = {pa.average_waiting_time:.2f} tu across {pa.queued_task_count} queued tasks)."
             )
+            if pt_rows and pt_rows[0]["Task Count"] > 0:
+                prod_row = pt_rows[0]
+                exp_row  = pt_rows[1]
+                low_row  = pt_rows[2]
+                pa_note += (
+                    f" For the **Official Production Tier (priorities 9–11, {prod_row['Task Count']} tasks)**, "
+                    f"PAALB reduced turnaround time from {prod_row['Traditional Throttled Avg RT (tu)']} tu to "
+                    f"{prod_row['PAALB Avg RT (tu)']} tu ({prod_row['Percentage Change']}). "
+                    f"For the **High-Priority Experimental Group (priorities 8–11, {exp_row['Task Count']} tasks)**, "
+                    f"turnaround time was reduced from {exp_row['Traditional Throttled Avg RT (tu)']} tu to "
+                    f"{exp_row['PAALB Avg RT (tu)']} tu ({exp_row['Percentage Change']}). "
+                    f"For the **Low-Priority Group ({low_row['Task Count']} tasks)**, response time changed from "
+                    f"{low_row['Traditional Throttled Avg RT (tu)']} tu to {low_row['PAALB Avg RT (tu)']} tu ({low_row['Percentage Change']}), "
+                    f"with dynamic aging bounding overtaking to 40 time units relative to newly arriving tasks."
+                )
+            else:
+                pa_note += (
+                    " PAALB uses multi-criteria scoring to prioritize latency-sensitive workloads while dynamic aging "
+                    "establishes a 40-unit overtaking horizon relative to newly arriving tasks."
+                )
+            notes.append(pa_note)
 
         for note in notes:
             st.markdown(note)

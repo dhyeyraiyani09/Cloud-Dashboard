@@ -69,6 +69,7 @@ class SimulationEngine:
         self.scaling_listener                   = None  # AutoScalingListener | None
         self.current_metrics                    = None  # PerformanceMetrics | None
         self.comparison_results: Optional[Dict] = None  # Phase 6
+        self.comparison_tasks  : Optional[Dict] = None  # Phase 14.1 Task records from comparison
         self.scalability_results: Optional[List]= None  # Phase 7
         self.failover_manager                   = None  # FailoverManager | None  (Phase 8)
         self.workload_source   : str            = "synthetic"
@@ -237,6 +238,7 @@ class SimulationEngine:
         )
 
         comparison: Dict = {}
+        comparison_tasks: Dict = {}
 
         for algo_name, algo_fn in [
             (ALGO_RR, run_round_robin),
@@ -262,13 +264,101 @@ class SimulationEngine:
             else:
                 m = self._compute_metrics_from_state(tmp_vms, tmp_tasks, algo_name)
             comparison[algo_name] = m
+            comparison_tasks[algo_name] = tmp_tasks
 
         # Backward compatibility alias for legacy tests and callers
         comparison[ALGO_TH_LEGACY] = comparison[ALGO_TH]
         comparison["PAALB"] = comparison[ALGO_PAALB]
+        comparison_tasks[ALGO_TH_LEGACY] = comparison_tasks[ALGO_TH]
+        comparison_tasks["PAALB"] = comparison_tasks[ALGO_PAALB]
 
         self.comparison_results = comparison
+        self.comparison_tasks   = comparison_tasks
         return comparison
+
+    def get_priority_tier_comparison(self) -> Optional[List[Dict[str, Any]]]:
+        """
+        Dynamically calculate Priority-Tier Performance Comparison metrics
+        between Traditional Throttled and PAALB from the actual task records
+        of the last comparison run.
+
+        Groups evaluated:
+          1. Official Production Tier: priorities 9–11.
+          2. High-Priority Experimental Group: priorities 8–11.
+          3. Low-Priority Group: priorities 0–2.
+
+        Returns
+        -------
+        List of dicts formatted for tabular presentation, or None if no comparison run.
+        """
+        if not self.comparison_tasks:
+            return None
+
+        tt_tasks = self.comparison_tasks.get("Traditional Throttled")
+        pa_tasks = (
+            self.comparison_tasks.get("Priority-Aware Adaptive (PAALB)") or
+            self.comparison_tasks.get("PAALB")
+        )
+        if not tt_tasks or not pa_tasks:
+            return None
+
+        tier_definitions = [
+            ("Official Production Tier (Priorities 9–11)", lambda p: p is not None and 9 <= p <= 11),
+            ("High-Priority Experimental Group (Priorities 8–11)", lambda p: p is not None and 8 <= p <= 11),
+            ("Low-Priority Group (Priorities 0–2)", lambda p: p is not None and 0 <= p <= 2),
+        ]
+
+        rows = []
+        for tier_name, predicate in tier_definitions:
+            tt_matching = [
+                t for t in tt_tasks
+                if predicate(getattr(t, "priority", None)) and t.response_time is not None
+            ]
+            pa_matching = [
+                t for t in pa_tasks
+                if predicate(getattr(t, "priority", None)) and t.response_time is not None
+            ]
+
+            count = len(tt_matching)
+            if count == 0:
+                rows.append({
+                    "Priority Tier / Group"         : tier_name,
+                    "Task Count"                    : 0,
+                    "Traditional Throttled Avg RT (tu)": "—",
+                    "PAALB Avg RT (tu)"             : "—",
+                    "Absolute Change (tu)"          : "—",
+                    "Percentage Change"             : "—",
+                })
+                continue
+
+            tt_mean = sum(t.response_time for t in tt_matching) / count
+            pa_mean = sum(t.response_time for t in pa_matching) / len(pa_matching)
+            delta = pa_mean - tt_mean
+
+            if tt_mean > 0:
+                pct = (delta / tt_mean) * 100.0
+                if delta < -1e-4:
+                    pct_str = f"{pct:.2f}% (Improvement)"
+                elif delta > 1e-4:
+                    pct_str = f"+{pct:.2f}% (Regression)"
+                else:
+                    pct_str = "0.00% (No change)"
+            else:
+                pct_str = "—"
+
+            delta_sign = "+" if delta > 0 else ""
+            delta_str = f"{delta_sign}{delta:.2f}"
+
+            rows.append({
+                "Priority Tier / Group"         : tier_name,
+                "Task Count"                    : count,
+                "Traditional Throttled Avg RT (tu)": f"{tt_mean:.2f}",
+                "PAALB Avg RT (tu)"             : f"{pa_mean:.2f}",
+                "Absolute Change (tu)"          : delta_str,
+                "Percentage Change"             : pct_str,
+            })
+
+        return rows
 
     # ── Internal metric computation ───────────────────────────────────────────
 
@@ -511,6 +601,7 @@ class SimulationEngine:
         self.scaling_listener   = None
         self.current_metrics    = None    # Phase 6
         self.comparison_results = None    # Phase 6
+        self.comparison_tasks   = None    # Phase 14.1
         self.scalability_results = None   # Phase 7
         self.failover_manager   = None    # Phase 8
         self.workload_source    = "synthetic"
