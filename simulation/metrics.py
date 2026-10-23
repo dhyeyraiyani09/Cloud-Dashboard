@@ -82,9 +82,14 @@ class PerformanceMetrics:
     load_imbalance        : int   = 0
     normalized_imbalance  : float = 0.0
 
+    # Phase 12 discrete-event queueing metrics (Traditional Throttled)
+    average_waiting_time  : float = 0.0
+    maximum_waiting_time  : float = 0.0
+    queued_task_count     : int   = 0
+
     def to_dict(self) -> Dict:
         """Flat dict for DataFrames / JSON serialisation."""
-        return {
+        d = {
             "Algorithm"             : self.algorithm,
             "Tasks"                 : self.total_tasks,
             "Active VMs"            : self.active_vm_count,
@@ -99,6 +104,11 @@ class PerformanceMetrics:
             "Load Imbalance (units)": self.load_imbalance,
             "Norm. Imbalance %"     : round(self.normalized_imbalance, 2),
         }
+        if self.average_waiting_time > 0 or self.queued_task_count > 0:
+            d["Avg Waiting Time"] = round(self.average_waiting_time, 2)
+            d["Max Waiting Time"] = round(self.maximum_waiting_time, 2)
+            d["Queued Tasks"]     = self.queued_task_count
+        return d
 
 
 def compute_metrics(vms, tasks, algorithm: str = "") -> PerformanceMetrics:
@@ -146,33 +156,60 @@ def compute_metrics(vms, tasks, algorithm: str = "") -> PerformanceMetrics:
     min_vm_workload = min(vm_workloads) if vm_workloads else 0
     avg_vm_workload = (sum(vm_workloads) / n_active) if n_active > 0 else 0.0
 
-    # ── Makespan ───────────────────────────────────────────────────────────────
-    # Sequential processing model: each VM executes its tasks one after another.
-    # A VM's total simulated execution time = its cumulative assigned workload.
-    makespan = float(max_vm_workload)
+    # ── Makespan & Response / Waiting Times ───────────────────────────────────
+    # If tasks carry discrete-event timing attributes (populated by Round Robin,
+    # Least-Loaded Dynamic, or Traditional Throttled), derive metrics directly
+    # from the execution timeline. Otherwise fall back to Phase 6 sequential accumulation.
+    has_timing = any(getattr(t, "completion_time", None) is not None for t in tasks)
 
-    # ── Response times (sequential completion model) ──────────────────────────
-    # For each VM, walk task_ids in assignment order and accumulate.
-    # completion_time(task) = sum of processing_req of all tasks on this VM
-    # that were assigned before (and including) this task.
-    response_times: List[float] = []
-    for vm in active_vms:
-        cumulative = 0
-        for tid in vm.task_ids:
-            task = task_map.get(tid)
-            if task is None:
-                continue
-            cumulative += task.processing_req
-            response_times.append(float(cumulative))  # arrival = 0
+    if has_timing:
+        completed_tasks = [
+            t for t in tasks
+            if t.assigned_vm_id is not None and getattr(t, "completion_time", None) is not None
+        ]
+        assigned_count = len(completed_tasks)
+        completion_times = [float(t.completion_time) for t in completed_tasks]
+        makespan = max(completion_times) if completion_times else 0.0
 
-    n_rt = len(response_times)
-    avg_rt = (sum(response_times) / n_rt) if n_rt > 0 else 0.0
-    max_rt = max(response_times) if response_times else 0.0
+        response_times = [
+            float(t.response_time) for t in completed_tasks if getattr(t, "response_time", None) is not None
+        ]
+        avg_rt = (sum(response_times) / len(response_times)) if response_times else 0.0
+        max_rt = max(response_times) if response_times else 0.0
+
+        waiting_times = [
+            float(t.waiting_time) for t in completed_tasks if getattr(t, "waiting_time", None) is not None
+        ]
+        avg_wt = (sum(waiting_times) / len(waiting_times)) if waiting_times else 0.0
+        max_wt = max(waiting_times) if waiting_times else 0.0
+        queued_count = sum(1 for w in waiting_times if w > 0.0)
+    else:
+        # Sequential processing model (Phase 6): each VM executes its tasks one after another.
+        # A VM's total simulated execution time = its cumulative assigned workload.
+        makespan = float(max_vm_workload)
+
+        # For each VM, walk task_ids in assignment order and accumulate.
+        # completion_time(task) = sum of processing_req of all tasks on this VM
+        # that were assigned before (and including) this task.
+        response_times: List[float] = []
+        for vm in active_vms:
+            cumulative = 0
+            for tid in vm.task_ids:
+                task = task_map.get(tid)
+                if task is None:
+                    continue
+                cumulative += task.processing_req
+                response_times.append(float(cumulative))  # arrival = 0
+
+        n_rt = len(response_times)
+        avg_rt = (sum(response_times) / n_rt) if n_rt > 0 else 0.0
+        max_rt = max(response_times) if response_times else 0.0
+        avg_wt = 0.0
+        max_wt = 0.0
+        queued_count = 0
+        assigned_count = sum(1 for v in active_vms for _ in v.task_ids)
 
     # ── Throughput ─────────────────────────────────────────────────────────────
-    completed_tasks = len([t for t in tasks if task_map.get(t.task_id)])
-    # Count tasks that were actually assigned (have an assigned VM)
-    assigned_count = sum(1 for v in active_vms for _ in v.task_ids)
     throughput = (assigned_count / makespan) if makespan > 0 else 0.0
 
     # ── Cluster Utilization ────────────────────────────────────────────────────
@@ -203,4 +240,18 @@ def compute_metrics(vms, tasks, algorithm: str = "") -> PerformanceMetrics:
         avg_vm_workload       = round(avg_vm_workload, 2),
         load_imbalance        = load_imbalance,
         normalized_imbalance  = round(norm_imbalance, 2),
+        average_waiting_time  = round(avg_wt, 2),
+        maximum_waiting_time  = round(max_wt, 2),
+        queued_task_count     = queued_count,
     )
+
+
+def compute_discrete_event_metrics(vms, tasks, algorithm: str = "") -> PerformanceMetrics:
+    """
+    Phase 12 — Compute PerformanceMetrics from discrete-event execution records.
+
+    Dedicated calculation path for algorithms like Traditional Throttled where
+    tasks have exact simulated arrival, start, and completion times with potential
+    waiting periods in a central queue. Unifies directly with compute_metrics().
+    """
+    return compute_metrics(vms=vms, tasks=tasks, algorithm=algorithm)

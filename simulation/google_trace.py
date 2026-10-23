@@ -72,6 +72,12 @@ DEFAULT_TRACE_SAMPLE_PATH = os.path.join(
     "google_cluster_trace_sample.csv"
 )
 
+SNAPSHOT_TRACE_SAMPLE_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data",
+    "google_cluster_trace_snapshot.csv"
+)
+
 TRACE_VERSION = "Google Cluster Data 2011-2 (v2.1)"
 TRACE_LICENSE = "Creative Commons Attribution 4.0 International (CC-BY 4.0)"
 TRACE_SOURCE_URL = "https://github.com/google/cluster-data"
@@ -245,6 +251,20 @@ def parse_google_trace(
                 f"Read {records_read} records, all were skipped: {skip_reasons}"
             )
 
+        # ── Relative Arrival Time Normalization ───────────────────────────────
+        # Identify first timestamp to anchor simulation arrival time at t = 0.0 seconds
+        first_ts: Optional[int] = None
+        for t in tasks:
+            if t.timestamp is not None:
+                first_ts = t.timestamp
+                break
+
+        for t in tasks:
+            if t.timestamp is not None and first_ts is not None:
+                t.arrival_time = round(max(0.0, float(t.timestamp - first_ts) / 1_000_000.0), 6)
+            else:
+                t.arrival_time = 0.0
+
         min_cpu = min(raw_cpus) if raw_cpus else 0.0
         max_cpu = max(raw_cpus) if raw_cpus else 0.0
         avg_cpu = (sum(raw_cpus) / len(raw_cpus)) if raw_cpus else 0.0
@@ -267,23 +287,29 @@ def parse_google_trace(
             text_stream.close()
 
 
-def load_bundled_google_trace(max_tasks: Optional[int] = None) -> TraceParseResult:
+def load_bundled_google_trace(
+    max_tasks   : Optional[int] = None,
+    sample_type : str           = "staggered",
+) -> TraceParseResult:
     """
-    Load the genuine bundled Google Cluster Trace 2011-2 sample from data/.
+    Load genuine bundled Google Cluster Trace 2011-2 data from data/.
 
     Parameters
     ----------
-    max_tasks : Optional maximum number of tasks to load.
+    max_tasks   : Optional maximum number of tasks to load.
+    sample_type : "staggered" (default) for genuine time-distributed task submissions,
+                  or "snapshot" for initial cell snapshot (t=0 batch arrival).
 
     Returns
     -------
     TraceParseResult containing the verified tasks.
     """
-    if not os.path.exists(DEFAULT_TRACE_SAMPLE_PATH):
+    target_path = SNAPSHOT_TRACE_SAMPLE_PATH if sample_type == "snapshot" else DEFAULT_TRACE_SAMPLE_PATH
+    if not os.path.exists(target_path):
         raise FileNotFoundError(
-            f"Bundled Google Cluster Trace sample not found at: {DEFAULT_TRACE_SAMPLE_PATH}"
+            f"Bundled Google Cluster Trace sample not found at: {target_path}"
         )
-    return parse_google_trace(DEFAULT_TRACE_SAMPLE_PATH, max_tasks=max_tasks)
+    return parse_google_trace(target_path, max_tasks=max_tasks)
 
 
 # ── Helper parsing utilities ──────────────────────────────────────────────────

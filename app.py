@@ -37,9 +37,10 @@ from simulation.google_trace import (
 )
 
 # ── Algorithm identifiers ─────────────────────────────────────────────────────
-ALGO_RR           = "Round Robin (Static)"
-ALGO_LEAST_LOADED = "Least-Loaded Dynamic (Existing Variant)"
-ALGO_THROTTLED    = ALGO_LEAST_LOADED  # backward compatibility alias
+ALGO_RR             = "Round Robin (Static)"
+ALGO_LEAST_LOADED   = "Least-Loaded Dynamic (Existing Variant)"
+ALGO_TRAD_THROTTLED = "Traditional Throttled"
+ALGO_THROTTLED      = ALGO_LEAST_LOADED  # backward compatibility alias
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page configuration — must be the first Streamlit call
@@ -195,9 +196,9 @@ with st.sidebar:
     st.markdown("**Load Balancing Algorithm**")
     algorithm = st.radio(
         label="Algorithm",
-        options=[ALGO_RR, ALGO_LEAST_LOADED],
+        options=[ALGO_RR, ALGO_LEAST_LOADED, ALGO_TRAD_THROTTLED],
         index=0,
-        help="Round Robin (Static) vs Least-Loaded Dynamic (Existing Variant, previously labeled Throttled).",
+        help="Round Robin (Static) vs Least-Loaded Dynamic (Existing Variant) vs Traditional Throttled (Baseline).",
         label_visibility="collapsed",
     )
 
@@ -218,17 +219,27 @@ with st.sidebar:
     if workload_source == "Google Cluster Trace":
         trace_mode = st.radio(
             "Trace Source",
-            options=["Bundled 2011-2 Sample", "Upload Custom Trace CSV"],
+            options=[
+                "Bundled Staggered Trace (2011-2, varied timestamps)",
+                "Bundled Snapshot Trace (2011-2, t=0 batch)",
+                "Upload Custom Trace CSV",
+            ],
             index=0,
-            horizontal=True,
-            help="Select the bundled official 500-task sample or upload your own trace CSV.",
+            horizontal=False,
+            help="Choose between genuine time-distributed arrivals, baseline t=0 batch snapshot, or custom CSV.",
         )
-        if trace_mode == "Bundled 2011-2 Sample":
+        if trace_mode == "Bundled Staggered Trace (2011-2, varied timestamps)":
             try:
-                trace_parse_result = load_bundled_google_trace()
+                trace_parse_result = load_bundled_google_trace(sample_type="staggered")
                 trace_tasks = trace_parse_result.tasks
             except Exception as e:
-                st.error(f"Failed to load bundled trace: {e}")
+                st.error(f"Failed to load staggered trace: {e}")
+        elif trace_mode == "Bundled Snapshot Trace (2011-2, t=0 batch)":
+            try:
+                trace_parse_result = load_bundled_google_trace(sample_type="snapshot")
+                trace_tasks = trace_parse_result.tasks
+            except Exception as e:
+                st.error(f"Failed to load snapshot trace: {e}")
         else:
             st.caption(
                 "Upload a Google Cluster Trace CSV (`task_events`) or CSV with a `cpu_request` column."
@@ -402,7 +413,12 @@ with st.sidebar:
                     )
                 else:
                     engine.run_algorithm()
-                    algo_short = "Round Robin" if "round robin" in algorithm.lower() else "Least-Loaded Dynamic"
+                    if "round robin" in algorithm.lower():
+                        algo_short = "Round Robin"
+                    elif "traditional" in algorithm.lower():
+                        algo_short = "Traditional Throttled"
+                    else:
+                        algo_short = "Least-Loaded Dynamic"
                     sl = engine.scaling_listener
                     scale_note = ""
                     if sl and (sl.vms_added or sl.vms_removed):
@@ -525,12 +541,18 @@ with st.sidebar:
         help="Starting VM count for the scalability test. Scaling Listener may adjust.",
     )
 
+    include_trad_scal = st.checkbox(
+        "Include Traditional Throttled Baseline",
+        value=False,
+        help="Also benchmark the Traditional Throttled algorithm across the workload progression.",
+    )
+
     scal_btn = st.button(
         "📈  Run Scalability Test",
         use_container_width=True,
         type="primary",
         help=(
-            "Runs both Round Robin AND Least-Loaded Dynamic across the selected workload(s) "
+            "Runs algorithms across the selected workload(s) "
             "using identical task lists. Does NOT affect main simulation state."
         ),
     )
@@ -551,11 +573,13 @@ with st.sidebar:
                     min_vms              = min_vms_cfg,
                     max_vms              = max_vms_cfg,
                     custom_tasks         = trace_tasks if workload_source == "Google Cluster Trace" else None,
+                    include_traditional  = include_trad_scal,
                 )
                 n_runs = len(engine.scalability_results)
+                n_algos = 3 if include_trad_scal else 2
                 src_note = "Google Cluster Trace" if workload_source == "Google Cluster Trace" else "seed=42"
                 st.success(
-                    f"✅ Scalability test complete! ({n_runs // 2} workload sizes × 2 algorithms, "
+                    f"✅ Scalability test complete! ({n_runs // n_algos} workload sizes × {n_algos} algorithms, "
                     f"{src_note}, scaling={'ON' if scaling_enabled else 'OFF'})"
                 )
             except Exception as exc:
@@ -599,6 +623,21 @@ if algorithm == ALGO_RR:
                 Tasks are assigned sequentially to VMs in a fixed cyclic order
                 <em>without considering current VM workload</em>.
                 Simple and deterministic — VM-1 → VM-2 → … → VM-N → VM-1 → …
+            </div>
+        </div>
+    </div>""", unsafe_allow_html=True)
+elif algorithm == ALGO_TRAD_THROTTLED:
+    st.markdown("""
+    <div class="algo-info-banner algo-info-throttled">
+        <div class="ai-icon">⏳</div>
+        <div>
+            <div class="ai-title">Traditional Throttled — Baseline Dynamic Load Balancing</div>
+            <div class="ai-desc">
+                Follows the canonical availability-table approach (Wickremasinghe et al., 2010): Maintains an AVAILABLE/BUSY state
+                table for each VM. Incoming tasks are dispatched to the <em>first available VM</em> in table order.
+                If all VMs are BUSY, tasks are throttled into a <strong>FIFO waiting queue</strong>. When a VM completes a task,
+                it reverts to AVAILABLE and immediately pulls the next waiting task from the queue.
+                <br><em>Simulated service durations are deterministically derived from normalized processing units to model queueing delays and turnaround time.</em>
             </div>
         </div>
     </div>""", unsafe_allow_html=True)
@@ -1013,6 +1052,13 @@ if sim_done and engine.algorithm_result:
             "💡 Round Robin distributes tasks cyclically but **does not** account for task "
             "size, so VMs may have different total loads even if task counts are equal."
         )
+    elif "traditional" in engine.algorithm.lower():
+        section_title = "⏳  Traditional Throttled Assignment Summary"
+        caption_note  = (
+            "💡 Traditional Throttled allocates tasks to the **first available VM** in the availability table. "
+            "When all VMs are BUSY, incoming tasks enter a **FIFO waiting queue**. "
+            "Task response time comprises both waiting time and simulated service time."
+        )
     else:
         section_title = "⚡  Least-Loaded Dynamic Assignment Summary"
         caption_note  = (
@@ -1116,6 +1162,31 @@ with pm_cols[3]:
         <div class="metric-sub">{sub_str}</div>
     </div>""", unsafe_allow_html=True)
 
+if pm and (pm.queued_task_count > 0 or pm.average_waiting_time > 0 or "traditional" in engine.algorithm.lower()):
+    q_cols = st.columns(3)
+    with q_cols[0]:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">Avg Queue Waiting Time</div>
+            <div class="metric-value">{pm.average_waiting_time:.2f} tu</div>
+            <div class="metric-sub">Max: {pm.maximum_waiting_time:.2f} tu · FIFO delay</div>
+        </div>""", unsafe_allow_html=True)
+    with q_cols[1]:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">Queued Tasks Count</div>
+            <div class="metric-value">{pm.queued_task_count} / {pm.total_tasks}</div>
+            <div class="metric-sub">Tasks held in FIFO queue while all VMs BUSY</div>
+        </div>""", unsafe_allow_html=True)
+    with q_cols[2]:
+        avg_svc = max(0.0, pm.average_response_time - pm.average_waiting_time)
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">Mean Service Duration</div>
+            <div class="metric-value">{avg_svc:.2f} tu</div>
+            <div class="metric-sub">Turnaround ({pm.average_response_time:.2f}) = Wait + Service</div>
+        </div>""", unsafe_allow_html=True)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Section 6 — Algorithm Comparison (Phase 6 — quantitative)
@@ -1124,97 +1195,150 @@ st.markdown('<p class="section-title">⚖️  Algorithm Comparison</p>', unsafe_
 
 # Explanation of algorithms
 st.markdown("""
-<div style="display:flex; gap:1rem; margin-bottom:1rem;">
-    <div style="flex:1; background:#1e293b; padding:1rem; border-radius:8px; border-left:4px solid #3b82f6;">
+<div style="display:flex; gap:1rem; margin-bottom:1rem; flex-wrap:wrap;">
+    <div style="flex:1; min-width:220px; background:#1e293b; padding:1rem; border-radius:8px; border-left:4px solid #3b82f6;">
         <strong style="color:#60a5fa;">🔵 ROUND ROBIN — STATIC</strong><br>
         <span style="font-size:0.85rem; color:#cbd5e1;">
         • Uses fixed cyclic assignment.<br>
         • Does not consider current VM workload.<br>
         • Simple and deterministic.</span>
     </div>
-    <div style="flex:1; background:#1e293b; padding:1rem; border-radius:8px; border-left:4px solid #f97316;">
+    <div style="flex:1; min-width:220px; background:#1e293b; padding:1rem; border-radius:8px; border-left:4px solid #f97316;">
         <strong style="color:#fb923c;">🟠 LEAST-LOADED DYNAMIC (EXISTING VARIANT)</strong><br>
         <span style="font-size:0.85rem; color:#cbd5e1;">
         • Considers current cumulative VM workload.<br>
-        • Selects the least-loaded available VM.<br>
-        • Dynamically reacts to task size variations.<br>
+        • Selects least-loaded available VM.<br>
+        • Adapts to heterogeneous task sizes.<br>
         • <em>Note: Previously labeled Throttled.</em></span>
+    </div>
+    <div style="flex:1; min-width:220px; background:#1e293b; padding:1rem; border-radius:8px; border-left:4px solid #10b981;">
+        <strong style="color:#34d399;">🟢 TRADITIONAL THROTTLED — BASELINE</strong><br>
+        <span style="font-size:0.85rem; color:#cbd5e1;">
+        • Availability table (AVAILABLE / BUSY).<br>
+        • First-available allocation.<br>
+        • FIFO waiting queue when all VMs BUSY.<br>
+        • Canonical CloudAnalyst model.</span>
     </div>
 </div>
 """, unsafe_allow_html=True)
 
 cmp = engine.comparison_results  # {algo_name: PerformanceMetrics} | None
-ALGO_RR = "Round Robin (Static)"
+ALGO_RR           = "Round Robin (Static)"
 ALGO_LEAST_LOADED = "Least-Loaded Dynamic (Existing Variant)"
-ALGO_TH = ALGO_LEAST_LOADED
+ALGO_TT           = "Traditional Throttled"
+ALGO_TH           = ALGO_LEAST_LOADED
 
 if not cmp:
     st.markdown("""
     <div class="empty-state-box">
-        ⚖️ Click <strong>Run Comparison</strong> in the sidebar to generate a fair, side-by-side comparison of Round Robin vs Least-Loaded Dynamic using the same workload (seed=42).
+        ⚖️ Click <strong>Run Comparison</strong> in the sidebar to generate a fair, side-by-side comparison across algorithms using the same workload.
     </div>
     """, unsafe_allow_html=True)
 else:
 
     rr = cmp.get(ALGO_RR)
     th = cmp.get(ALGO_LEAST_LOADED) or cmp.get("Throttled (Dynamic)")
+    tt = cmp.get(ALGO_TT)
 
     if rr and th:
         # ── Comparison table ──────────────────────────────────────────────────
         st.markdown("#### 📋 Metrics Summary")
         src_label = "Google Cluster Trace (clusterdata-2011-2)" if getattr(engine, "workload_source", "synthetic") == "google_trace" else "Synthetic Workload (seed=42)"
-        st.caption(f"**Workload Evaluated:** {src_label} — both algorithms received identical task records and ordering. *(Note: Least-Loaded Dynamic was previously labeled Throttled in this project).*")
+        st.caption(f"**Workload Evaluated:** {src_label} — all algorithms received identical task records and ordering. *(Note: Least-Loaded Dynamic was previously labeled Throttled in this project).*")
+
+        metrics_list = [
+            "Tasks",
+            "Active VMs",
+            "Total Workload (units)",
+            "Makespan (time units)",
+            "Avg Response Time (tu)",
+            "Max Response Time (tu)",
+            "Throughput (tasks/tu)",
+            "Cluster Utilization (%)",
+            "Load Imbalance (units)",
+            "Normalized Imbalance (%)",
+            "Max VM Workload (units)",
+            "Min VM Workload (units)",
+        ]
+        rr_vals = [
+            str(rr.total_tasks),
+            str(rr.active_vm_count),
+            str(rr.total_workload),
+            f"{rr.makespan:.2f}",
+            f"{rr.average_response_time:.2f}",
+            f"{rr.maximum_response_time:.2f}",
+            f"{rr.throughput:.4f}",
+            f"{rr.cluster_utilization:.2f}%",
+            str(rr.load_imbalance),
+            f"{rr.normalized_imbalance:.2f}%",
+            str(rr.max_vm_workload),
+            str(rr.min_vm_workload),
+        ]
+        th_vals = [
+            str(th.total_tasks),
+            str(th.active_vm_count),
+            str(th.total_workload),
+            f"{th.makespan:.2f}",
+            f"{th.average_response_time:.2f}",
+            f"{th.maximum_response_time:.2f}",
+            f"{th.throughput:.4f}",
+            f"{th.cluster_utilization:.2f}%",
+            str(th.load_imbalance),
+            f"{th.normalized_imbalance:.2f}%",
+            str(th.max_vm_workload),
+            str(th.min_vm_workload),
+        ]
+        lower_better = [
+            "—", "—", "—",
+            "✅", "✅", "✅",
+            "❌ Higher", "❌ Higher",
+            "✅", "✅",
+            "—", "—",
+        ]
+
         cmp_df_data = {
-            "Metric"              : [
-                "Tasks",
-                "Active VMs",
-                "Total Workload (units)",
-                "Makespan (time units)",
-                "Avg Response Time (tu)",
-                "Max Response Time (tu)",
-                "Throughput (tasks/tu)",
-                "Cluster Utilization (%)",
-                "Load Imbalance (units)",
-                "Normalized Imbalance (%)",
-                "Max VM Workload (units)",
-                "Min VM Workload (units)",
-            ],
-            "Round Robin (Static)": [
-                rr.total_tasks,
-                rr.active_vm_count,
-                rr.total_workload,
-                f"{rr.makespan:.0f}",
-                f"{rr.average_response_time:.2f}",
-                f"{rr.maximum_response_time:.2f}",
-                f"{rr.throughput:.4f}",
-                f"{rr.cluster_utilization:.2f}%",
-                rr.load_imbalance,
-                f"{rr.normalized_imbalance:.2f}%",
-                rr.max_vm_workload,
-                rr.min_vm_workload,
-            ],
-            "Least-Loaded Dynamic (Existing Variant)": [
-                th.total_tasks,
-                th.active_vm_count,
-                th.total_workload,
-                f"{th.makespan:.0f}",
-                f"{th.average_response_time:.2f}",
-                f"{th.maximum_response_time:.2f}",
-                f"{th.throughput:.4f}",
-                f"{th.cluster_utilization:.2f}%",
-                th.load_imbalance,
-                f"{th.normalized_imbalance:.2f}%",
-                th.max_vm_workload,
-                th.min_vm_workload,
-            ],
-            "Lower is Better": [
-                "—", "—", "—",
-                "✅", "✅", "✅",
-                "❌ Higher", "❌ Higher",
-                "✅", "✅",
-                "—", "—",
-            ],
+            "Metric"                                 : metrics_list,
+            "Round Robin (Static)"                   : rr_vals,
+            "Least-Loaded Dynamic (Existing Variant)": th_vals,
         }
+
+        if tt:
+            tt_vals = [
+                str(tt.total_tasks),
+                str(tt.active_vm_count),
+                str(tt.total_workload),
+                f"{tt.makespan:.2f}",
+                f"{tt.average_response_time:.2f}",
+                f"{tt.maximum_response_time:.2f}",
+                f"{tt.throughput:.4f}",
+                f"{tt.cluster_utilization:.2f}%",
+                str(tt.load_imbalance),
+                f"{tt.normalized_imbalance:.2f}%",
+                str(tt.max_vm_workload),
+                str(tt.min_vm_workload),
+            ]
+            if any((m.average_waiting_time > 0 or m.queued_task_count > 0) for m in [rr, th, tt] if m):
+                cmp_df_data["Metric"].extend([
+                    "Avg Queue Waiting Time (tu)",
+                    "Queued Tasks Count",
+                ])
+                cmp_df_data["Round Robin (Static)"].extend([
+                    f"{rr.average_waiting_time:.2f}",
+                    f"{rr.queued_task_count} of {rr.total_tasks}",
+                ])
+                cmp_df_data["Least-Loaded Dynamic (Existing Variant)"].extend([
+                    f"{th.average_waiting_time:.2f}",
+                    f"{th.queued_task_count} of {th.total_tasks}",
+                ])
+                tt_vals.extend([
+                    f"{tt.average_waiting_time:.2f}",
+                    f"{tt.queued_task_count} of {tt.total_tasks}",
+                ])
+                lower_better.extend(["✅", "✅"])
+            cmp_df_data["Traditional Throttled (Baseline)"] = tt_vals
+
+        cmp_df_data["Lower is Better"] = lower_better
+
         st.dataframe(
             pd.DataFrame(cmp_df_data),
             use_container_width=True,
@@ -1250,31 +1374,46 @@ else:
         else:
             notes.append("➖ Both algorithms had equal average response time.")
 
-        if rr.makespan < th.makespan:
+        if tt:
             notes.append(
-                f"🔵 **Round Robin** had a shorter makespan "
-                f"({rr.makespan:.0f} vs {th.makespan:.0f} tu)."
+                f"🟢 **Traditional Throttled Baseline** operated with discrete-event queueing: "
+                f"makespan = {tt.makespan:.2f} tu, avg response time = {tt.average_response_time:.2f} tu "
+                f"(including avg queue wait = {tt.average_waiting_time:.2f} tu across {tt.queued_task_count} queued tasks)."
             )
-        elif th.makespan < rr.makespan:
-            notes.append(
-                f"🟠 **Least-Loaded Dynamic** had a shorter makespan "
-                f"({th.makespan:.0f} vs {rr.makespan:.0f} tu)."
-            )
-        else:
-            notes.append("➖ Both algorithms produced the same makespan.")
 
         for note in notes:
             st.markdown(note)
 
         st.caption(
-            "ℹ️ Metrics use a sequential simulated execution model: "
+            "ℹ️ Metrics use a consistent discrete-event timing and execution model: "
             "processing rate = 1 unit/time unit per VM. "
-            "All results are deterministic for seed=42 workload."
+            "Round Robin models distributed per-VM FIFO queues; Least-Loaded Dynamic dispatches to the VM with lowest pending completion time; Traditional Throttled throttles intake via availability table and a central FIFO queue."
         )
 
         # ── Plotly Charts ─────────────────────────────────────────────────────
-        _CHART_COLORS = {"rr": "#3b82f6", "th": "#f97316"}  # blue, orange
-        _ALGO_LABELS  = ["Round Robin", "Least-Loaded Dynamic"]
+        _CHART_COLORS = {"rr": "#3b82f6", "th": "#f97316", "tt": "#10b981"}
+        if tt:
+            _ALGO_LABELS = ["Round Robin", "Least-Loaded Dynamic", "Traditional Throttled"]
+            _COLORS      = [_CHART_COLORS["rr"], _CHART_COLORS["th"], _CHART_COLORS["tt"]]
+            _ART_VALS    = [rr.average_response_time, th.average_response_time, tt.average_response_time]
+            _ART_TEXT    = [f"{rr.average_response_time:.2f}", f"{th.average_response_time:.2f}", f"{tt.average_response_time:.2f}"]
+            _TP_VALS     = [rr.throughput, th.throughput, tt.throughput]
+            _TP_TEXT     = [f"{rr.throughput:.4f}", f"{th.throughput:.4f}", f"{tt.throughput:.4f}"]
+            _CU_VALS     = [rr.cluster_utilization, th.cluster_utilization, tt.cluster_utilization]
+            _CU_TEXT     = [f"{rr.cluster_utilization:.2f}%", f"{th.cluster_utilization:.2f}%", f"{tt.cluster_utilization:.2f}%"]
+            _LI_VALS     = [rr.load_imbalance, th.load_imbalance, tt.load_imbalance]
+            _LI_TEXT     = [f"{rr.load_imbalance} units", f"{th.load_imbalance} units", f"{tt.load_imbalance} units"]
+        else:
+            _ALGO_LABELS = ["Round Robin", "Least-Loaded Dynamic"]
+            _COLORS      = [_CHART_COLORS["rr"], _CHART_COLORS["th"]]
+            _ART_VALS    = [rr.average_response_time, th.average_response_time]
+            _ART_TEXT    = [f"{rr.average_response_time:.2f}", f"{th.average_response_time:.2f}"]
+            _TP_VALS     = [rr.throughput, th.throughput]
+            _TP_TEXT     = [f"{rr.throughput:.4f}", f"{th.throughput:.4f}"]
+            _CU_VALS     = [rr.cluster_utilization, th.cluster_utilization]
+            _CU_TEXT     = [f"{rr.cluster_utilization:.2f}%", f"{th.cluster_utilization:.2f}%"]
+            _LI_VALS     = [rr.load_imbalance, th.load_imbalance]
+            _LI_TEXT     = [f"{rr.load_imbalance} units", f"{th.load_imbalance} units"]
 
         with st.expander("📊  View Performance Charts", expanded=True):
             ch_col1, ch_col2 = st.columns(2)
@@ -1283,9 +1422,9 @@ else:
             with ch_col1:
                 fig1 = go.Figure(go.Bar(
                     x=_ALGO_LABELS,
-                    y=[rr.average_response_time, th.average_response_time],
-                    marker_color=[_CHART_COLORS["rr"], _CHART_COLORS["th"]],
-                    text=[f"{rr.average_response_time:.2f}", f"{th.average_response_time:.2f}"],
+                    y=_ART_VALS,
+                    marker_color=_COLORS,
+                    text=_ART_TEXT,
                     textposition="outside",
                 ))
                 fig1.update_layout(
@@ -1302,9 +1441,9 @@ else:
             with ch_col2:
                 fig2 = go.Figure(go.Bar(
                     x=_ALGO_LABELS,
-                    y=[rr.throughput, th.throughput],
-                    marker_color=[_CHART_COLORS["rr"], _CHART_COLORS["th"]],
-                    text=[f"{rr.throughput:.4f}", f"{th.throughput:.4f}"],
+                    y=_TP_VALS,
+                    marker_color=_COLORS,
+                    text=_TP_TEXT,
                     textposition="outside",
                 ))
                 fig2.update_layout(
@@ -1323,9 +1462,9 @@ else:
             with ch_col3:
                 fig3 = go.Figure(go.Bar(
                     x=_ALGO_LABELS,
-                    y=[rr.cluster_utilization, th.cluster_utilization],
-                    marker_color=[_CHART_COLORS["rr"], _CHART_COLORS["th"]],
-                    text=[f"{rr.cluster_utilization:.2f}%", f"{th.cluster_utilization:.2f}%"],
+                    y=_CU_VALS,
+                    marker_color=_COLORS,
+                    text=_CU_TEXT,
                     textposition="outside",
                 ))
                 fig3.update_layout(
@@ -1342,9 +1481,9 @@ else:
             with ch_col4:
                 fig4 = go.Figure(go.Bar(
                     x=_ALGO_LABELS,
-                    y=[rr.load_imbalance, th.load_imbalance],
-                    marker_color=[_CHART_COLORS["rr"], _CHART_COLORS["th"]],
-                    text=[f"{rr.load_imbalance} units", f"{th.load_imbalance} units"],
+                    y=_LI_VALS,
+                    marker_color=_COLORS,
+                    text=_LI_TEXT,
                     textposition="outside",
                 ))
                 fig4.update_layout(
@@ -1633,6 +1772,12 @@ else:
             "continued cycling through the remaining available VMs only — "
             f"{fs['failed_vm_name']} was excluded from the rotation."
         )
+    elif "traditional" in algo_name.lower():
+        algo_desc = (
+            "**Traditional Throttled failover:** After the failure, the failed VM was "
+            f"removed from the availability table. Subsequent tasks were dispatched "
+            f"to the {fs['final_active_vms']} remaining available VMs or queued if busy."
+        )
     else:
         algo_desc = (
             "**Least-Loaded Dynamic failover:** After the failure, the least-load "
@@ -1655,20 +1800,23 @@ st.markdown('<p class="section-title">📈  Workload & Scalability Testing</p>',
 scal = engine.scalability_results  # List[Dict] | None
 _RR  = "Round Robin (Static)"
 _LL  = "Least-Loaded Dynamic (Existing Variant)"
+_TT  = "Traditional Throttled"
 _TH  = _LL
 _C_RR = "#3b82f6"   # blue
 _C_TH = "#f97316"   # orange
+_C_TT = "#10b981"   # emerald green
 
 if not scal:
     st.markdown("""
     <div class="empty-state-box">
-        📈 Click <strong>Run Scalability Test</strong> in the sidebar to test both algorithms across multiple workload sizes (10 / 50 / 100 / 500 tasks).
+        📈 Click <strong>Run Scalability Test</strong> in the sidebar to benchmark algorithms across multiple workload sizes (10 / 50 / 100 / 500 tasks).
     </div>
     """, unsafe_allow_html=True)
 else:
     # ── Derive per-algorithm series ───────────────────────────────────────────
     rr_rows = [r for r in scal if r["algorithm"] == _RR]
     th_rows = [r for r in scal if r["algorithm"] in (_LL, "Throttled (Dynamic)")]
+    tt_rows = [r for r in scal if r["algorithm"] == _TT]
     task_labels_rr = [str(r["tasks"]) for r in rr_rows]
     task_labels_th = [str(r["tasks"]) for r in th_rows]
     # Use the union of tested task counts as x-axis labels
@@ -1711,7 +1859,7 @@ else:
     )
 
     # ── Charts ────────────────────────────────────────────────────────────────
-    def _make_line_chart(rr_y, th_y, x_labels, title, yaxis_title):
+    def _make_line_chart(rr_y, th_y, x_labels, title, yaxis_title, tt_y=None):
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=x_labels, y=rr_y, mode="lines+markers",
@@ -1723,6 +1871,12 @@ else:
             name="Least-Loaded Dynamic", line=dict(color=_C_TH, width=2),
             marker=dict(size=8),
         ))
+        if tt_y:
+            fig.add_trace(go.Scatter(
+                x=x_labels, y=tt_y, mode="lines+markers",
+                name="Traditional Throttled", line=dict(color=_C_TT, width=2),
+                marker=dict(size=8),
+            ))
         fig.update_layout(
             title=title,
             xaxis_title="Number of Tasks",
@@ -1738,16 +1892,21 @@ else:
     with st.expander("📊  View Scalability Charts", expanded=True):
         sc_col1, sc_col2 = st.columns(2)
 
-        rr_rt  = [r["avg_response_time"] for r in rr_rows]
-        th_rt  = [r["avg_response_time"] for r in th_rows]
-        rr_tp  = [r["throughput"]        for r in rr_rows]
-        th_tp  = [r["throughput"]        for r in th_rows]
-        rr_imb = [r["load_imbalance"]    for r in rr_rows]
-        th_imb = [r["load_imbalance"]    for r in th_rows]
-        rr_vm  = [r["final_vms"]         for r in rr_rows]
-        th_vm  = [r["final_vms"]         for r in th_rows]
-        rr_util= [r["cluster_util"]      for r in rr_rows]
-        th_util= [r["cluster_util"]      for r in th_rows]
+        rr_rt   = [r["avg_response_time"] for r in rr_rows]
+        th_rt   = [r["avg_response_time"] for r in th_rows]
+        tt_rt   = [r["avg_response_time"] for r in tt_rows] if tt_rows else None
+        rr_tp   = [r["throughput"]        for r in rr_rows]
+        th_tp   = [r["throughput"]        for r in th_rows]
+        tt_tp   = [r["throughput"]        for r in tt_rows] if tt_rows else None
+        rr_imb  = [r["load_imbalance"]    for r in rr_rows]
+        th_imb  = [r["load_imbalance"]    for r in th_rows]
+        tt_imb  = [r["load_imbalance"]    for r in tt_rows] if tt_rows else None
+        rr_vm   = [r["final_vms"]         for r in rr_rows]
+        th_vm   = [r["final_vms"]         for r in th_rows]
+        tt_vm   = [r["final_vms"]         for r in tt_rows] if tt_rows else None
+        rr_util = [r["cluster_util"]      for r in rr_rows]
+        th_util = [r["cluster_util"]      for r in th_rows]
+        tt_util = [r["cluster_util"]      for r in tt_rows] if tt_rows else None
 
         with sc_col1:
             st.plotly_chart(
@@ -1755,6 +1914,7 @@ else:
                     rr_rt, th_rt, task_labels_rr,
                     "Avg Response Time vs Workload — Lower is better",
                     "Simulated time units",
+                    tt_y=tt_rt,
                 ),
                 use_container_width=True,
             )
@@ -1764,6 +1924,7 @@ else:
                     rr_tp, th_tp, task_labels_rr,
                     "Throughput vs Workload — Higher is better",
                     "Tasks / time unit",
+                    tt_y=tt_tp,
                 ),
                 use_container_width=True,
             )
@@ -1775,6 +1936,7 @@ else:
                     rr_imb, th_imb, task_labels_rr,
                     "Load Imbalance vs Workload — Lower is better",
                     "Max − Min VM workload (units)",
+                    tt_y=tt_imb,
                 ),
                 use_container_width=True,
             )
@@ -1784,6 +1946,7 @@ else:
                     rr_vm, th_vm, task_labels_rr,
                     "Active VMs vs Workload",
                     "Active VM count",
+                    tt_y=tt_vm,
                 ),
                 use_container_width=True,
             )
@@ -1794,6 +1957,7 @@ else:
                 rr_util, th_util, task_labels_rr,
                 "Cluster Utilization vs Workload — Higher is better",
                 "Utilization %",
+                tt_y=tt_util,
             ),
             use_container_width=True,
         )
@@ -1866,10 +2030,11 @@ with st.expander("ℹ️  About This Project", expanded=False):
 **Algorithms:**
 - 🔄 **Round Robin (Static)** — Assigns tasks cyclically without considering VM workload.
 - ⚡ **Least-Loaded Dynamic (Existing Variant)** — Assigns each task to the available VM with minimum cumulative workload (previously labeled Throttled).
+- ⏳ **Traditional Throttled (Baseline)** — Canonical availability-table baseline (Wickremasinghe et al., 2010) with first-available dispatch, busy state tracking, and FIFO waiting queue.
 
 **Supporting Features:**
 - ⚡ Automated Scaling Listener — adjusts VM count based on workload pressure
-- 📊 Performance Metrics — makespan, response time, throughput, utilization
+- 📊 Performance Metrics — makespan, response time, throughput, utilization, and queue waiting time
 - 📈 Workload & Scalability Testing — 10 / 50 / 100 / 500 task progressions
 - 🛡️ VM Failure & Failover — deterministic fault tolerance simulation
 - 🌐 Google Cluster Trace Integration — evaluation on real Google cluster workload data (CC-BY 4.0)
@@ -1886,11 +2051,12 @@ with st.expander("ℹ️  About This Project", expanded=False):
 
 **Workload Sources & Terminology:**
 - *Synthetic Workload* — Configurable mixed distribution (~50% small, 30% medium, 20% large)
-- *Google Cluster Trace* — Empirical task resource requests from official Google Cluster Data 2011-2 (v2.1). Normalized via `clamp(round(CPU_Request * 100), 1, 100)` into simulator processing units
+- *Google Cluster Trace* — Empirical task submissions from Google Cluster Data 2011-2 (v2.1). Supports both genuine time-staggered arrivals (500 records spanning 125.19s) and initial cell snapshot ($t=0$ batch). Normalized via `clamp(round(CPU_Request * 100), 1, 100)` into simulator processing units
+- *Discrete-Event Execution Model* — Evaluates all algorithms under a unified execution timeline. Round Robin models distributed per-VM FIFO queues; Least-Loaded Dynamic dispatches to the VM with lowest pending completion time; Traditional Throttled throttles intake via availability table and a central FIFO queue
 - *Assigned Workload* — cumulative processing units assigned (not real CPU%)
 - *Cluster Workload Pressure* — total_req ÷ (active_vms × capacity) × 100 (uncapped)
-- *Makespan* — time from start of first task to end of last task on any VM
-- *Throughput* — tasks per simulated time unit
+- *Makespan* — total duration from simulation start to completion of the final task across all VMs
+- *Throughput* — tasks completed per simulated time unit
 """)
 
 # ─────────────────────────────────────────────────────────────────────────────

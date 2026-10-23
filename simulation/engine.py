@@ -141,6 +141,9 @@ class SimulationEngine:
         if "round robin" in algo:
             from algorithms.round_robin import run_round_robin
             result = run_round_robin(self.vms, self.tasks)
+        elif "traditional" in algo:
+            from algorithms.traditional_throttled import run_traditional_throttled
+            result = run_traditional_throttled(self.vms, self.tasks)
         elif "throttled" in algo or "least-loaded" in algo or "least loaded" in algo:
             from algorithms.throttled import run_throttled
             result = run_throttled(self.vms, self.tasks)
@@ -150,14 +153,20 @@ class SimulationEngine:
         self.algorithm_result = result
         self.status = SIM_COMPLETED
 
-        # Phase 6 — auto-compute metrics after every run
-        self.current_metrics = self._compute_metrics_from_state(
-            self.vms, self.tasks, self.algorithm
-        )
+        # Phase 6 & Phase 12 — compute metrics after every run
+        if "metrics" in result:
+            self.current_metrics = result["metrics"]
+        else:
+            self.current_metrics = self._compute_metrics_from_state(
+                self.vms, self.tasks, self.algorithm
+            )
         return result
 
     def compute_current_metrics(self):
         """Explicitly (re-)compute metrics from current state."""
+        if self.algorithm_result and "metrics" in self.algorithm_result:
+            self.current_metrics = self.algorithm_result["metrics"]
+            return self.current_metrics
         self.current_metrics = self._compute_metrics_from_state(
             self.vms, self.tasks, self.algorithm
         )
@@ -195,10 +204,12 @@ class SimulationEngine:
         import copy
         from algorithms.round_robin import run_round_robin
         from algorithms.throttled   import run_throttled
+        from algorithms.traditional_throttled import run_traditional_throttled
         from simulation.scaling     import AutoScalingListener
 
         ALGO_RR = "Round Robin (Static)"
         ALGO_TH = "Least-Loaded Dynamic (Existing Variant)"
+        ALGO_TT = "Traditional Throttled"
         ALGO_TH_LEGACY = "Throttled (Dynamic)"
 
         # ── Generate ONE canonical task list ───────────────────────────────────
@@ -222,7 +233,11 @@ class SimulationEngine:
 
         comparison: Dict = {}
 
-        for algo_name, algo_fn in [(ALGO_RR, run_round_robin), (ALGO_TH, run_throttled)]:
+        for algo_name, algo_fn in [
+            (ALGO_RR, run_round_robin),
+            (ALGO_TH, run_throttled),
+            (ALGO_TT, run_traditional_throttled),
+        ]:
             # Fresh VMs and a deep copy of the canonical tasks
             tmp_vms   = create_vms(num_vms, base_capacity=vm_capacity)
             tmp_tasks = copy.deepcopy(canonical_tasks)
@@ -233,10 +248,13 @@ class SimulationEngine:
                 listener.evaluate_and_scale(tmp_vms, tmp_tasks)
 
             # Run the algorithm
-            algo_fn(tmp_vms, tmp_tasks)
+            res = algo_fn(tmp_vms, tmp_tasks)
 
             # Compute metrics
-            m = self._compute_metrics_from_state(tmp_vms, tmp_tasks, algo_name)
+            if isinstance(res, dict) and "metrics" in res:
+                m = res["metrics"]
+            else:
+                m = self._compute_metrics_from_state(tmp_vms, tmp_tasks, algo_name)
             comparison[algo_name] = m
 
         # Backward compatibility alias for legacy tests and callers
@@ -249,8 +267,10 @@ class SimulationEngine:
 
     @staticmethod
     def _compute_metrics_from_state(vms, tasks, algorithm: str):
-        """Delegate to simulation.metrics.compute_metrics()."""
-        from simulation.metrics import compute_metrics
+        """Delegate to simulation.metrics.compute_metrics() or compute_discrete_event_metrics()."""
+        from simulation.metrics import compute_metrics, compute_discrete_event_metrics
+        if "traditional" in algorithm.lower():
+            return compute_discrete_event_metrics(vms, tasks, algorithm)
         return compute_metrics(vms, tasks, algorithm)
 
     def run_scalability_test(
@@ -265,18 +285,19 @@ class SimulationEngine:
         min_vms              : int       = 2,
         max_vms              : int       = 10,
         custom_tasks         : Optional[List[Task]] = None,
+        include_traditional  : bool      = False,
     ) -> List[Dict]:
         """
-        Phase 7 — Workload & Scalability Testing.
+        Phase 7 & Phase 12 — Workload & Scalability Testing.
 
-        Runs both algorithms across multiple workload sizes on IDENTICAL
+        Runs algorithms across multiple workload sizes on IDENTICAL
         canonical task lists.  For each workload size:
           1. Generate ONE canonical task list (deterministic seed).
-          2. Deep-copy for Round Robin and for Throttled.
+          2. Deep-copy for each algorithm.
           3. Create fresh VM pools for each.
           4. Apply identical scaling (deterministic — workload-driven).
-          5. Run Round Robin / Throttled independently.
-          6. Compute metrics using Phase 6 compute_metrics().
+          5. Run algorithms independently.
+          6. Compute metrics using Phase 6 / Phase 12 compute_metrics().
 
         Parameters
         ----------
@@ -289,6 +310,8 @@ class SimulationEngine:
         scale_down_threshold : Pressure % threshold to remove a VM
         min_vms              : Minimum VMs the listener will scale to
         max_vms              : Maximum VMs the listener will scale to
+        custom_tasks         : Optional external task list (e.g. Google Cluster Trace)
+        include_traditional  : Include Traditional Throttled in comparison (default: False for backward compatibility)
 
         Returns
         -------
@@ -311,7 +334,13 @@ class SimulationEngine:
 
         ALGO_RR = "Round Robin (Static)"
         ALGO_TH = "Least-Loaded Dynamic (Existing Variant)"
+        ALGO_TT = "Traditional Throttled"
         ALGO_TH_LEGACY = "Throttled (Dynamic)"
+
+        algos = [(ALGO_RR, run_round_robin), (ALGO_TH, run_throttled)]
+        if include_traditional:
+            from algorithms.traditional_throttled import run_traditional_throttled
+            algos.append((ALGO_TT, run_traditional_throttled))
 
         scaling_kwargs = dict(
             scale_up_threshold   = scale_up_threshold,
@@ -335,7 +364,7 @@ class SimulationEngine:
             else:
                 canonical_tasks = generate_tasks(n_tasks, seed=seed)
 
-            for algo_name, algo_fn in [(ALGO_RR, run_round_robin), (ALGO_TH, run_throttled)]:
+            for algo_name, algo_fn in algos:
                 tmp_vms   = create_vms(num_vms, base_capacity=vm_capacity)
                 tmp_tasks = copy.deepcopy(canonical_tasks)
 
@@ -353,10 +382,13 @@ class SimulationEngine:
                     final_pressure   = listener.final_pressure
 
                 # Run load balancing algorithm
-                algo_fn(tmp_vms, tmp_tasks)
+                res = algo_fn(tmp_vms, tmp_tasks)
 
-                # Compute metrics via Phase 6 function (unchanged)
-                m = self._compute_metrics_from_state(tmp_vms, tmp_tasks, algo_name)
+                # Compute metrics via Phase 6 / Phase 12 function
+                if isinstance(res, dict) and "metrics" in res:
+                    m = res["metrics"]
+                else:
+                    m = self._compute_metrics_from_state(tmp_vms, tmp_tasks, algo_name)
 
                 results.append({
                     "tasks"             : n_tasks,
@@ -424,6 +456,9 @@ class SimulationEngine:
         if "round robin" in algo:
             from algorithms.round_robin import run_round_robin
             algo_fn = run_round_robin
+        elif "traditional" in algo:
+            from algorithms.traditional_throttled import run_traditional_throttled
+            algo_fn = run_traditional_throttled
         elif "throttled" in algo or "least-loaded" in algo or "least loaded" in algo:
             from algorithms.throttled import run_throttled
             algo_fn = run_throttled

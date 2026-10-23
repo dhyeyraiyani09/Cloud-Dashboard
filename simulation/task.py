@@ -46,6 +46,11 @@ class Task:
     raw_cpu_request: Optional[float] = None
     raw_mem_request: Optional[float] = None
     priority       : Optional[int] = None
+    arrival_time   : float = 0.0
+    start_time     : Optional[float] = None
+    completion_time: Optional[float] = None
+    waiting_time   : Optional[float] = None
+    response_time  : Optional[float] = None
 
     # ── State mutation helpers ─────────────────────────────────────────────────
 
@@ -65,6 +70,11 @@ class Task:
         """Reset task to its initial Pending state."""
         self.assigned_vm_id = None
         self.status = STATUS_PENDING
+        self.arrival_time = 0.0
+        self.start_time = None
+        self.completion_time = None
+        self.waiting_time = None
+        self.response_time = None
 
     def to_dict(self) -> dict:
         """Serialise Task to a plain dictionary (useful for display tables)."""
@@ -77,6 +87,9 @@ class Task:
             "Status"      : self.status,
             "Assigned VM" : vm_label,
         }
+        if self.start_time is not None:
+            d["Wait (tu)"] = f"{self.waiting_time:.1f}" if self.waiting_time is not None else "0.0"
+            d["Resp (tu)"] = f"{self.response_time:.1f}" if self.response_time is not None else "—"
         if self.source == "google_trace":
             d["Job ID"] = self.job_id if self.job_id is not None else "—"
             d["Raw CPU"] = f"{self.raw_cpu_request:.4f}" if self.raw_cpu_request is not None else "—"
